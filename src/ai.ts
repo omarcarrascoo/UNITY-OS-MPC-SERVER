@@ -78,15 +78,18 @@ export async function generateAndWriteCode(
         rawText = completion.choices[0].message?.content || '{}';
     }
 
-    // Limpieza de Markdown
+    // 1. Limpieza básica de Markdown
     rawText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
 
-    // ✂️ Extractor agresivo de JSON para domar a DeepSeek/Llama
+    // ✂️ 2. Extractor agresivo de JSON para domar a DeepSeek/Llama
     const firstBrace = rawText.indexOf('{');
     const lastBrace = rawText.lastIndexOf('}');
     if (firstBrace !== -1 && lastBrace !== -1 && lastBrace >= firstBrace) {
         rawText = rawText.substring(firstBrace, lastBrace + 1);
     }
+
+    // 🧹 3. NUEVO: Purificador de caracteres invisibles (Non-breaking spaces y saltos raros)
+    rawText = rawText.replace(/[\u00A0\u2028\u2029\u200B]/g, ' ');
 
     try {
         const parsedData: AIResponse = JSON.parse(rawText);
