@@ -18,7 +18,6 @@ export async function prepareWorkspace(): Promise<void> {
     } else {
         console.log(`🔄 Resetting and updating ${process.env.GITHUB_REPO} for a fresh start...`);
         
-        // Limpieza forzada para evitar conflictos de Git
         await execPromise(`git reset --hard HEAD`, { cwd: TARGET_REPO_PATH }).catch(() => {});
         await execPromise(`git clean -fd`, { cwd: TARGET_REPO_PATH }).catch(() => {});
         

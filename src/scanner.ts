@@ -1,38 +1,39 @@
 import fs from 'fs';
 import path from 'path';
 
-export function getProjectContext(dirPath: string, baseDir: string = dirPath): string {
-    let context = '';
-    if (!fs.existsSync(dirPath)) return context; 
+export function getProjectTree(dirPath: string, prefix: string = ''): string {
+    let tree = '';
+    if (!fs.existsSync(dirPath)) return tree;
 
     const items = fs.readdirSync(dirPath);
     
-    // 🛡️ Filtros estrictos para no saturar a la IA
-    const ignoreDirs = ['node_modules', '.git', 'assets', 'dist', '.expo', 'workspaces', 'ios', 'android', 'web-build', 'scripts', '.github'];
-    const ignoreFiles = ['package-lock.json', 'yarn.lock', 'bun.lockb', 'babel.config.js', 'metro.config.js', 'app.json', 'eas.json'];
+    const ignoreDirs = ['node_modules', '.git', 'assets', 'dist', '.expo', 'workspaces', 'ios', 'android', 'web-build', 'scripts', '.github', 'components/__tests__'];
+    const ignoreFiles = ['package-lock.json', 'yarn.lock', 'bun.lockb', 'babel.config.js', 'metro.config.js', 'app.json', 'eas.json', '.gitignore', '.env', '.env.example'];
 
-    for (const item of items) {
+    items.sort((a, b) => {
+        const aIsDir = fs.statSync(path.join(dirPath, a)).isDirectory();
+        const bIsDir = fs.statSync(path.join(dirPath, b)).isDirectory();
+        if (aIsDir && !bIsDir) return -1;
+        if (!aIsDir && bIsDir) return 1;
+        return a.localeCompare(b);
+    });
+
+    for (let i = 0; i < items.length; i++) {
+        const item = items[i];
         const fullPath = path.join(dirPath, item);
+        const isLast = i === items.length - 1;
         const stat = fs.statSync(fullPath);
-        
+
         if (stat.isDirectory()) {
             if (!ignoreDirs.includes(item)) {
-                context += getProjectContext(fullPath, baseDir);
+                tree += `${prefix}${isLast ? '└── ' : '├── '}${item}/\n`;
+                tree += getProjectTree(fullPath, prefix + (isLast ? '    ' : '│   '));
             }
         } else {
-            // Solo leemos código fuente
-            if (/\.(js|jsx|ts|tsx)$/.test(item) && !ignoreFiles.includes(item)) {
-                const relativePath = path.relative(baseDir, fullPath);
-                const content = fs.readFileSync(fullPath, 'utf8');
-                
-                // Límite de 20,000 caracteres por archivo
-                if (content.length < 20000) {
-                    context += `\n--- FILE: ${relativePath} ---\n${content}\n`;
-                } else {
-                    console.log(`⚠️ Archivo muy grande saltado: ${relativePath}`);
-                }
+            if (!ignoreFiles.includes(item) && !item.startsWith('.')) {
+                tree += `${prefix}${isLast ? '└── ' : '├── '}${item}\n`;
             }
         }
     }
-    return context;
+    return tree;
 }

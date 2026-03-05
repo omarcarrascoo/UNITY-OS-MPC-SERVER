@@ -1,9 +1,8 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import OpenAI from 'openai';
-import Anthropic from '@anthropic-ai/sdk';
 import fs from 'fs';
 import path from 'path';
 import { TARGET_REPO_PATH } from './config.js';
+import { agentTools, readFile, searchProject } from './tools.js';
 
 export interface GeneratedFile { filepath: string; code: string; }
 export interface AIResponse { targetRoute: string; commitMessage: string; files: GeneratedFile[]; }
@@ -11,91 +10,114 @@ export interface AIResponse { targetRoute: string; commitMessage: string; files:
 export async function generateAndWriteCode(
     userPrompt: string, 
     figmaData: string | null, 
-    projectContext: string
+    projectTree: string 
 ): Promise<{ targetRoute: string, commitMessage: string }> {
-    const provider = process.env.AI_PROVIDER || 'gemini';
-    console.log(`🧠 AI Engine Initialized: ${provider.toUpperCase()}`);
+    
+    console.log(`🧠 AI Agent Initialized: DEEPSEEK (Agentic Mode)`);
 
     const figmaInstructions = figmaData ? `JSON FIGMA: ${figmaData}` : "";
 
     const systemPrompt = `
-    You are an Expert Software Architect and UI/UX Developer specializing in React Native and Expo Router.
+    You are Jarvis, an Expert Autonomous AI Software Architect for React Native (Expo).
     
-    CURRENT PROJECT CODEBASE:
-    ${projectContext ? projectContext : "(Empty)"}
+    PROJECT MAP (Directory Tree):
+    ${projectTree ? projectTree : "(Empty)"}
+    
     ${figmaInstructions}
 
-    USER REQUEST:
+    YOUR OBJECTIVE:
     "${userPrompt}"
     
-    ABSOLUTE RULE 1: Respond ONLY with a valid JSON object.
-    ABSOLUTE RULE 2: The JSON object MUST follow this exact structure:
+    AGENT RULES:
+    1. You DO NOT know the contents of the files yet. You ONLY see the map above.
+    2. You MUST use the 'read_file' tool to inspect a file's code before you try to edit it.
+    3. If you don't know where a component is located, use the 'search_project' tool.
+    4. Once you have all the context you need, you MUST output a FINAL JSON response.
+    
+    FINAL OUTPUT RULES (ABSOLUTE):
+    When you are ready to deliver the final code, your message MUST be ONLY a valid JSON object.
     {
       "targetRoute": "/path-to-test",
       "commitMessage": "feat(profile): added delete account button",
       "files": [
-        { "filepath": "app/(tabs)/index.tsx", "code": "full code..." }
+        { "filepath": "app/(tabs)/index.tsx", "code": "full new code..." }
       ]
     }
-    ABSOLUTE RULE 3: "commitMessage" MUST be a descriptive Conventional Commit message.
-    ABSOLUTE RULE 4: "targetRoute" MUST be the exact Expo Router URL path to verify changes visually.
-    ABSOLUTE RULE 5: NEVER leave code incomplete.
     `;
 
-    let rawText = '';
+    const openai = new OpenAI({ 
+        baseURL: 'https://api.deepseek.com', 
+        apiKey: process.env.DEEPSEEK_API_KEY as string 
+    });
 
-    if (provider === 'gemini') {
-        const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY as string);
-        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-        const result = await model.generateContent(systemPrompt);
-        rawText = result.response.text();
+    const messages: any[] = [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt }
+    ];
 
-    } else if (provider === 'anthropic') {
-        const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY as string });
-        const msg = await anthropic.messages.create({
-            model: "claude-sonnet-4-5-20250929", 
-            max_tokens: 8192, 
+    let finalRawText = '';
+    let loopCount = 0;
+    const MAX_LOOPS = 100; 
+
+    while (loopCount < MAX_LOOPS) {
+        loopCount++;
+        console.log(`⏳ Agent thinking... (Iteration ${loopCount})`);
+
+        const response = await openai.chat.completions.create({
+            model: 'deepseek-chat',
+            messages: messages,
+            tools: agentTools,
             temperature: 0.1,
-            system: systemPrompt,
-            messages: [{ role: "user", content: `USER REQUEST: "${userPrompt}"\n\nRemember: Respond ONLY with the valid JSON object.` }]
+            max_tokens: 8192
         });
-        if (msg.content[0].type === 'text') rawText = msg.content[0].text;
 
-    } else {
-        let baseURL = '', apiKey = '', modelName = '';
-        if (provider === 'deepseek') { baseURL = 'https://api.deepseek.com'; apiKey = process.env.DEEPSEEK_API_KEY as string; modelName = 'deepseek-chat'; } 
-        else if (provider === 'groq') { baseURL = 'https://api.groq.com/openai/v1'; apiKey = process.env.GROQ_API_KEY as string; modelName = 'llama-3.3-70b-versatile'; } 
-        else if (provider === 'openrouter') { baseURL = 'https://openrouter.ai/api/v1'; apiKey = process.env.OPENROUTER_API_KEY as string; modelName = 'qwen/qwen-2.5-coder-32b-instruct:free'; }
+        const msg = response.choices[0].message;
+        messages.push(msg);
 
-        const openai = new OpenAI({ baseURL, apiKey });
-        const completion = await openai.chat.completions.create({
-            model: modelName,
-            messages: [{ role: "system", content: systemPrompt }],
-            temperature: 0.1,
-            max_tokens: 8192,
-            ...(provider === 'deepseek' && { response_format: { type: 'json_object' } })
-        });
-        rawText = completion.choices[0].message?.content || '{}';
+        if (msg.tool_calls && msg.tool_calls.length > 0) {
+            for (const toolCall of msg.tool_calls) {
+                const funcName = toolCall.function.name;
+                const args = JSON.parse(toolCall.function.arguments);
+                let toolResult = "";
+
+                if (funcName === "read_file") {
+                    toolResult = readFile(args.filepath);
+                } else if (funcName === "search_project") {
+                    toolResult = searchProject(args.keyword);
+                }
+
+                messages.push({
+                    role: "tool",
+                    tool_call_id: toolCall.id,
+                    name: funcName,
+                    content: toolResult
+                });
+            }
+        } else {
+            console.log(`✅ Agent finished thinking! Delivering code...`);
+            finalRawText = msg.content || '{}';
+            break;
+        }
     }
 
-    // 1. Limpieza básica de Markdown
-    rawText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
+    if (loopCount >= MAX_LOOPS) {
+        throw new Error("Agent reached maximum loop limit without returning the final JSON.");
+    }
 
-    // ✂️ 2. Extractor agresivo de JSON para domar a DeepSeek/Llama
-    const firstBrace = rawText.indexOf('{');
-    const lastBrace = rawText.lastIndexOf('}');
+    // Extractor agresivo de JSON y limpieza
+    finalRawText = finalRawText.replace(/```json/gi, '').replace(/```/g, '').trim();
+    const firstBrace = finalRawText.indexOf('{');
+    const lastBrace = finalRawText.lastIndexOf('}');
     if (firstBrace !== -1 && lastBrace !== -1 && lastBrace >= firstBrace) {
-        rawText = rawText.substring(firstBrace, lastBrace + 1);
+        finalRawText = finalRawText.substring(firstBrace, lastBrace + 1);
     }
-
-    // 🧹 3. NUEVO: Purificador de caracteres invisibles (Non-breaking spaces y saltos raros)
-    rawText = rawText.replace(/[\u00A0\u2028\u2029\u200B]/g, ' ');
+    finalRawText = finalRawText.replace(/[\u00A0\u2028\u2029\u200B]/g, ' ');
 
     try {
-        const parsedData: AIResponse = JSON.parse(rawText);
+        const parsedData: AIResponse = JSON.parse(finalRawText);
         const filesToCreate = parsedData.files || [];
         const targetRoute = parsedData.targetRoute || '/';
-        const commitMessage = parsedData.commitMessage || 'feat: auto-update from AI';
+        const commitMessage = parsedData.commitMessage || 'feat: update via Jarvis Agent';
 
         for (const file of filesToCreate) {
             const fullPath = path.join(TARGET_REPO_PATH, file.filepath);
@@ -108,7 +130,7 @@ export async function generateAndWriteCode(
         return { targetRoute, commitMessage };
 
     } catch (error) {
-        console.error("❌ RAW AI RESPONSE QUE ROMPIÓ EL JSON:\n", rawText);
+        console.error("❌ RAW AI RESPONSE QUE ROMPIÓ EL JSON:\n", finalRawText);
         throw new Error("The AI failed to format the response as JSON. Please try again.");
     }
 }

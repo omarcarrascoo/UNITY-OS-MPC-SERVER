@@ -3,25 +3,23 @@ import 'dotenv/config';
 
 import { TARGET_REPO_PATH } from './src/config.js';
 import { prepareWorkspace, createPullRequest } from './src/git.js';
-import { getProjectContext } from './src/scanner.js';
+import { getProjectTree } from './src/scanner.js'; // 🗺️ Ahora importamos el árbol
 import { getFigmaContext } from './src/figma.js';
 import { takeSnapshot } from './src/snapshot.js';
 import { generateAndWriteCode } from './src/ai.js';
 
 const client = new Client({ intents: [ GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent ]});
 
-// 🧠 Memoria a corto plazo para iteraciones
 const sessionStore = new Map<string, string>();
 
 client.on('messageCreate', async (message: Message) => {
     if (message.author.bot || (message.channel as any).name !== 'jarvis-dev') return;
 
-    // Detectamos si es una Iteración (Reply)
     const isIteration = !!message.reference;
 
     const replyMessage = await message.reply(
         isIteration 
-        ? '🤖 Acknowledged. Iterating over current modifications...' 
+        ? '🤖 Acknowledged. Agent iterating over current modifications...' 
         : '🤖 Acknowledged. Preparing a fresh workspace...'
     );
 
@@ -33,13 +31,15 @@ client.on('messageCreate', async (message: Message) => {
         const figmaData = await getFigmaContext(message.content);
         if (figmaData) await replyMessage.edit('🎨 Figma link detected. Analyzing design...');
         
-        const projectContext = getProjectContext(TARGET_REPO_PATH);
+        // 🗺️ Generamos el mapa ligero del proyecto
+        const projectTree = getProjectTree(TARGET_REPO_PATH);
         
         const finalPrompt = isIteration 
             ? `We are iterating on the current code. Keep the recent changes but apply this correction: "${message.content}"` 
             : message.content;
 
-        const { targetRoute, commitMessage } = await generateAndWriteCode(finalPrompt, figmaData, projectContext);
+        // Pasamos el árbol al Agente
+        const { targetRoute, commitMessage } = await generateAndWriteCode(finalPrompt, figmaData, projectTree);
         
         const sessionId = Date.now().toString().slice(-6);
         sessionStore.set(sessionId, commitMessage);
@@ -53,7 +53,7 @@ client.on('messageCreate', async (message: Message) => {
         );
 
         await replyMessage.edit({ 
-            content: `✨ Ready! (Engine: ${(process.env.AI_PROVIDER || 'gemini').toUpperCase()})\n📝 **Commit:** \`${commitMessage}\``,
+            content: `✨ Ready! (Agent: DEEPSEEK)\n📝 **Commit:** \`${commitMessage}\``,
             files: [new AttachmentBuilder(actualSnapshotPath)],
             components: [row]
         });
@@ -96,4 +96,4 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 });
 
 client.login(process.env.DISCORD_TOKEN as string);
-console.log('🤖 Jarvis Git Flow listening on Discord...');
+console.log('🤖 Jarvis Git Flow Agent listening on Discord...');
