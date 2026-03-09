@@ -1,8 +1,12 @@
 import OpenAI from 'openai';
 import fs from 'fs';
 import path from 'path';
+import { exec } from 'child_process';
+import util from 'util';
 import { TARGET_REPO_PATH } from './config.js';
 import { agentTools, readFile, searchProject, runCommand } from './tools.js'; 
+
+const execPromise = util.promisify(exec);
 
 export interface FileEdit { filepath: string; search: string; replace: string; }
 export interface AIResponse { targetRoute: string; commitMessage: string; edits: FileEdit[]; }
@@ -25,13 +29,11 @@ DELIVERY RULES
 - Use "search" and "replace" blocks to patch files. The "search" string MUST perfectly match existing code.
 `;
 
-// Actualizamos la firma para recibir la memoria
 function buildSystemPrompt(userPrompt: string, figmaData: string | null, projectTree: string, projectMemory: string | null): string {
   const figmaInstructions = figmaData ? `FIGMA JSON CONTEXT:\n${figmaData}` : 'FIGMA JSON CONTEXT: (none)';
   
-  //Inyectamos la memoria en el System Prompt
   const memoryInstructions = projectMemory 
-    ? `\n\n### 🧠 REGLAS ESTRICTAS DEL PROYECTO (.unityrc.md) 🧠\nYou MUST strictly follow these architectural rules for this project:\n${projectMemory}\n` 
+    ? `\n\n### 🧠 STRICT PROJECT RULES (.unityrc.md) 🧠\nYou MUST strictly follow these architectural rules for this project:\n${projectMemory}\n` 
     : '';
 
   return `
@@ -47,11 +49,12 @@ USER OBJECTIVE
 "${userPrompt}"
 
 TOOL USAGE CONTRACT
-1) Inspect files with 'read_file' before editing.
-2) Use 'search_project' to find unknown components.
-3) Use 'run_command' ONLY to execute system/dependency commands (e.g., "cd app-folder && npm install package-name" or "npx tsc"). 
-4) CRITICAL RULE: DO NOT use 'run_command' to create or modify code files (no 'touch', 'echo', or 'cat'). All file creations and modifications MUST be done via the FINAL OUTPUT JSON.
-5) Before calling a tool, you MUST write a brief 1-2 sentence explanation of your thought process in the message content.
+1) ONLY inspect files with 'read_file' if modifying them is strictly necessary. Do NOT read files for simple creations (like READMEs).
+2) If you use 'read_file', ONLY read the specific lines you need (use startLine and endLine).
+3) Use 'search_project' to find unknown components.
+4) Use 'run_command' ONLY to execute system/dependency commands (e.g., "cd app-folder && npm install package-name" or "npx tsc"). 
+5) CRITICAL RULE: DO NOT use 'run_command' to create or modify code files (no 'touch', 'echo', or 'cat'). All file creations and modifications MUST be done via the FINAL OUTPUT JSON.
+6) Before calling a tool, you MUST write a brief 1-2 sentence explanation of your thought process in the message content.
 
 FINAL OUTPUT CONTRACT (STRICT)
 - Return exactly ONE valid JSON object.
@@ -92,7 +95,32 @@ function resolveSafeFilePath(relativeFilePath: string): string {
   return fullPath;
 }
 
-// 👇 CAMBIO 6: Actualizamos la firma para recibir la memoria
+// Función para inyectar código y detectar errores de parcheo
+function applyEditsToFiles(edits: FileEdit[]): string[] {
+    const patchErrors: string[] = [];
+    
+    for (const edit of edits) {
+        if (!edit.filepath) continue;
+        const fullPath = resolveSafeFilePath(edit.filepath);
+        const dir = path.dirname(fullPath);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+        if (!fs.existsSync(fullPath) || edit.search.trim() === "") {
+            fs.writeFileSync(fullPath, edit.replace, 'utf8'); 
+            continue;
+        }
+
+        let content = fs.readFileSync(fullPath, 'utf8');
+        if (content.includes(edit.search)) {
+            content = content.replace(edit.search, edit.replace);
+            fs.writeFileSync(fullPath, content, 'utf8');
+        } else {
+            patchErrors.push(`⚠️ Error in ${edit.filepath}: Exact 'search' block not found. You must match spaces and line breaks perfectly.`);
+        }
+    }
+    return patchErrors;
+}
+
 export async function generateAndWriteCode(
   userPrompt: string,
   figmaData: string | null,
@@ -104,7 +132,6 @@ export async function generateAndWriteCode(
   const openai = new OpenAI({ baseURL: 'https://api.deepseek.com', apiKey: process.env.DEEPSEEK_API_KEY as string });
 
   const messages: any[] = [
-    //Pasamos la memoria a la función que construye el prompt
     { role: 'system', content: buildSystemPrompt(userPrompt, figmaData, projectTree, projectMemory) },
     { role: 'user', content: userPrompt },
   ];
@@ -137,6 +164,7 @@ export async function generateAndWriteCode(
 
     const agentThought = message.content ? message.content.trim() : "";
 
+    // Manejo de herramientas (read_file, etc.)
     if (message.tool_calls?.length) {
       for (const toolCall of message.tool_calls) {
         const functionName = toolCall.function.name;
@@ -165,43 +193,66 @@ export async function generateAndWriteCode(
       continue;
     }
 
+    // Análisis de salida JSON
     const modelText = message.content || '';
     try {
       const candidate = extractJsonObject(modelText);
       finalResult = JSON.parse(candidate) as AIResponse;
       
-      if (agentThought && onStatusUpdate) {
-          onStatusUpdate(`✅ Preparing final code delivery...`, agentThought);
+      if (agentThought && onStatusUpdate) onStatusUpdate(`🧪 Validating syntax and compilation...`, agentThought);
+
+      // BUCLE DE AUTO-SANACIÓN PASO 1: Inyectar y verificar Patch
+      const patchErrors = applyEditsToFiles(finalResult.edits || []);
+      if (patchErrors.length > 0) {
+          messages.push({ 
+              role: 'user', 
+              content: `🚨 PATCH ERROR 🚨\nI could not apply your code. The following errors occurred:\n${patchErrors.join('\n')}\n\nPlease generate a new JSON correcting the 'search' block so it matches the current file exactly.` 
+          });
+          if (onStatusUpdate) onStatusUpdate(`⚠️ Error injecting code. Jarvis is self-correcting...`);
+          finalResult = null;
+          continue; 
       }
-      break;
-    } catch {
+
+      // BUCLE DE AUTO-SANACIÓN PASO 2: Verificar TypeScript (Nest/Expo)
+      let compilationErrors = '';
+      
+      const dirsToCheck = new Set((finalResult.edits || []).map(e => {
+          const parts = e.filepath.split('/');
+          return parts.length > 1 ? parts[0] : '.'; 
+      }));
+
+      for (const dir of dirsToCheck) {
+          const checkPath = dir === '.' ? TARGET_REPO_PATH : path.join(TARGET_REPO_PATH, dir);
+          
+          if (fs.existsSync(path.join(checkPath, 'tsconfig.json'))) {
+              try {
+                  await execPromise(`npx tsc --noEmit`, { cwd: checkPath });
+              } catch (err: any) {
+                  compilationErrors += `\n[Error in ${dir}]:\n${err.stdout || err.message}\n`;
+              }
+          }
+      }
+
+      // 📉 Truncamos el error a 800 caracteres máximo para ahorrar tokens
+      if (compilationErrors.trim() !== '') {
+          messages.push({ 
+              role: 'user', 
+              content: `🚨 COMPILATION ERROR 🚨\nYour last changes broke TypeScript. Here are the errors:\n${compilationErrors.substring(0, 800)}\n\nNote: The files ALREADY have your changes applied. Your new 'search' must target the broken code you just wrote. Generate a new JSON with the fix.` 
+          });
+          if (onStatusUpdate) onStatusUpdate(`⚠️ Compiler detected an error. Jarvis is rewriting logic...`);
+          finalResult = null;
+          continue;
+      }
+
+      if (onStatusUpdate) onStatusUpdate(`✅ Code successfully validated by compiler.`);
+      break; 
+
+    } catch (e) {
       messages.push({ role: 'user', content: 'Response was not valid JSON or failed to parse. Return exactly one JSON object.' });
     }
   }
 
-  if (!finalResult) throw new Error('Agent reached loop limit without valid JSON.');
-
-  if (onStatusUpdate) onStatusUpdate(`✅ Code ready! Applying surgical edits...`);
-
-  for (const edit of finalResult.edits || []) {
-    if (!edit.filepath) continue;
-    const fullPath = resolveSafeFilePath(edit.filepath);
-    const dir = path.dirname(fullPath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
-    if (!fs.existsSync(fullPath) || edit.search.trim() === "") {
-        fs.writeFileSync(fullPath, edit.replace, 'utf8'); 
-        continue;
-    }
-
-    let content = fs.readFileSync(fullPath, 'utf8');
-    if (content.includes(edit.search)) {
-        content = content.replace(edit.search, edit.replace);
-        fs.writeFileSync(fullPath, content, 'utf8');
-    } else {
-        console.warn(`⚠️ Warning: Exact search block not found in ${edit.filepath}.`);
-    }
-  }
+  if (!finalResult) throw new Error('Agent reached loop limit without passing compilation checks.');
 
   return { targetRoute: finalResult.targetRoute || '/', commitMessage: finalResult.commitMessage || 'feat: auto-update', tokenUsage: totalTokens };
 }
