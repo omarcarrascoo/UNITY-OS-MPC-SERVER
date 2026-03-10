@@ -45,17 +45,17 @@ Capabilities:
 
 ```mermaid
 flowchart LR
-    U[Discord user in #jarvis-dev] --> D[index.ts]
-    D --> W[prepareWorkspace() src/git.ts]
-    D --> S[getProjectTree + getProjectMemory src/scanner.ts]
-    D --> F[getFigmaContext() src/figma.ts]
-    D --> A[generateAndWriteCode() src/ai.ts]
-    A --> T[Tool layer src/tools.ts]
-    T --> R[(Target repo in workspaces/)]
-    A --> C[npx tsc --noEmit validation loop]
-    D --> P[takeSnapshot() src/snapshot.ts]
+    U[Discord user in jarvis-dev] --> D[index.ts]
+    D --> W[prepareWorkspace - src/git.ts]
+    D --> S[getProjectTree + getProjectMemory - src/scanner.ts]
+    D --> F[getFigmaContext - src/figma.ts]
+    D --> A[generateAndWriteCode - src/ai.ts]
+    A --> T[Tool layer - src/tools.ts]
+    T --> R[(Target repo in workspaces)]
+    A --> C[TypeScript validation loop - npx tsc --noEmit]
+    D --> P[takeSnapshot - src/snapshot.ts]
     P --> X[Expo + Puppeteer screenshot]
-    D --> PR[Approve button -> createPullRequest()]
+    D --> PR[Approve button to createPullRequest]
 ```
 
 Unity operates as a **tool‑driven AI system**.
