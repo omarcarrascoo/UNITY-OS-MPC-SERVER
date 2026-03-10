@@ -43,7 +43,7 @@ Capabilities:
 
 # 🏗 System Architecture
 
-```mermaid
+```
 flowchart TD
     U[Discord user in #jarvis-dev] --> D[index.ts]
     D --> W[prepareWorkspace() src/git.ts]
