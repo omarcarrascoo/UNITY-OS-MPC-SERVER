@@ -348,7 +348,7 @@ npx tsc
 ## Setup
 
 ```bash
-git clone <your-repo>
+git clone
 cd unity-os
 npm install
 ```
@@ -414,21 +414,72 @@ Reply to the same message to iterate.
 Unity can evolve into an **MCP-compatible system**.
 
 ```mermaid
-flowchart LR
-    C[MCP Client<br/>Claude/Cursor/VS Code] <--> M[unity-mcp-server]
-    M --> L[Tool Router]
-    L --> T1[read_file]
-    L --> T2[search_project]
-    L --> T3[run_command]
-    L --> T4[get_project_tree]
-    L --> T5[get_unity_memory]
-    L --> T6[prepare_workspace]
-    L --> T7[take_snapshot]
-    T1 --> R[(Target Repository)]
-    T2 --> R
-    T3 --> R
-    T6 --> R
-    T7 --> R
+flowchart TD
+    %% LAYER 1: Omni-Channel Inputs (Where requests come from)
+    subgraph Layer 1: Omni-Channel Interfaces
+        D[Discord Bot<br/>#jarvis-dev]
+        MCP[MCP Clients<br/>Cursor / Claude / VSCode]
+        W[WhatsApp / Telegram]
+        API[REST API / Webhooks]
+    end
+
+    %% LAYER 2: Orchestration & Event Routing
+    subgraph Layer 2: Unity Core OS
+        EB((Central Event Bus))
+        Router{Unity Orchestrator<br/>Intent Classifier LLM}
+    end
+
+    D --> EB
+    MCP --> EB
+    W --> EB
+    API --> EB
+    EB --> Router
+
+    %% LAYER 3: Memory Systems (The "State" of the OS)
+    subgraph Layer 3: Memory & Context
+        STM[Short-Term Memory<br/>Git Diffs / Session Cache]
+        LTM[Long-Term Memory<br/>.unityrc / Architecture Rules]
+        VDB[(Vector Database<br/>User Profiles / Past Work)]
+    end
+
+    Router <--> STM
+    Router <--> LTM
+    Router <--> VDB
+
+    %% LAYER 4: Specialized Autonomous Agents
+    subgraph Layer 4: Specialized Brains
+        Dev[👨‍💻 Dev Brain<br/>'Jarvis']
+        Fin[💸 Finance Brain<br/>Receipts & Ledger]
+        Vis[👁️ Vision Brain<br/>Image Analysis]
+        Ops[⚙️ Ops Brain<br/>CI/CD & Monitoring]
+    end
+
+    Router -->|Code/Arch Tasks| Dev
+    Router -->|Expenses/Data| Fin
+    Router -->|Images/Docs| Vis
+    Router -->|Deployments/Logs| Ops
+
+    %% LAYER 5: Tool Registries (What each brain can do)
+    subgraph Layer 5: Tool Execution Layer
+        DevTools[read_file, run_command<br/>take_snapshot, tsc, search]
+        FinTools[extract_ocr, parse_receipt<br/>save_to_mongo]
+        OpsTools[trigger_deploy, fetch_logs<br/>restart_server]
+    end
+
+    Dev --> DevTools
+    Fin --> FinTools
+    Ops --> OpsTools
+
+    %% LAYER 6: The Physical World
+    subgraph Layer 6: Target Environments
+        Repo[(Local Workspaces<br/>& Git Repos)]
+        DB[(MongoDB<br/>Atlas)]
+        Cloud[(Railway / Vercel<br/>AWS)]
+    end
+
+    DevTools <--> Repo
+    FinTools <--> DB
+    OpsTools <--> Cloud
 ```
 
 ### MCP Mapping Plan
