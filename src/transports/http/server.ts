@@ -118,25 +118,25 @@ function getStatusColor(status: string): string {
   switch (status) {
     case 'completed':
     case 'succeeded':
-      return '#4ade80'; // Emerald 400
+      return '#4ade80';
     case 'completed_with_warnings':
-      return '#f59e0b'; // Amber 500
+      return '#f59e0b';
     case 'awaiting_plan_approval':
     case 'pending':
-      return '#facc15'; // Yellow 400
+      return '#facc15';
     case 'failed':
     case 'blocked':
     case 'plan_rejected':
-      return '#f87171'; // Red 400
+      return '#f87171';
     case 'running':
     case 'healing':
     case 'planning':
-      return '#60a5fa'; // Blue 400
+      return '#60a5fa';
     case 'cancelled':
     case 'skipped':
-      return '#9ca3af'; // Gray 400
+      return '#9ca3af';
     default:
-      return '#d1d5db'; // Gray 300
+      return '#d1d5db';
   }
 }
 
@@ -256,7 +256,6 @@ function buildLevels(tasks: UiTask[]) {
 }
 
 function buildGraph(
-  runId: string,
   tasks: UiTask[],
   selectedTaskId: string | null,
 ): UiRunViewModel['graph'] {
@@ -327,22 +326,18 @@ function buildGraph(
       const stroke = active ? color : '#3f3f46';
       const glow = active ? `drop-shadow(0 0 10px ${color}40)` : 'none';
       const scopeLabel = escapeHtml(truncate((task.writeScope || ['.']).join(', '), 30));
-      const summary = escapeHtml(truncate(task.outputSummary || task.validationSummary || task.prompt || '', 60));
-      const taskHref = `/runs/${encodeURIComponent(runId)}?task=${encodeURIComponent(task.id)}`;
+      const summary = escapeHtml(truncate(task.outputSummary || task.validationSummary || task.prompt || '', 44));
 
-      return `<a href="${taskHref}">
-        <g class="node-group${active ? ' active' : ''}" data-task-id="${escapeHtml(task.id)}" transform="translate(${position.x} ${position.y})" style="filter:${glow};">
-          <rect class="node-card" x="0" y="0" rx="12" ry="12" width="${nodeWidth}" height="${nodeHeight}" fill="#18181b" stroke="${stroke}" />
-          <rect x="16" y="16" rx="6" ry="6" width="68" height="24" fill="${color}15" stroke="${color}30" />
-          <text x="26" y="32" class="node-subtitle" fill="${color}">${escapeHtml(task.status.toUpperCase())}</text>
-          
-          <circle cx="250" cy="28" r="4" fill="${color}" />
-          
-          <text x="16" y="64" class="node-title">${escapeHtml(truncate(task.title, 28))}</text>
-          <text x="16" y="84" class="node-subtitle">scope · ${scopeLabel}</text>
-          <text x="16" y="100" class="node-foot">${summary}</text>
-        </g>
-      </a>`;
+      return `<g class="node-group${active ? ' active' : ''}" data-task-id="${escapeHtml(task.id)}" transform="translate(${position.x} ${position.y})" style="filter:${glow}">
+        <rect class="node-hitbox" x="-8" y="-8" rx="16" ry="16" width="${nodeWidth + 16}" height="${nodeHeight + 16}" />
+        <rect class="node-card" x="0" y="0" rx="12" ry="12" width="${nodeWidth}" height="${nodeHeight}" fill="#18181b" stroke="${stroke}" stroke-width="1.5"/>
+        <rect x="16" y="16" rx="6" ry="6" width="68" height="24" fill="${color}15" stroke="${color}30" />
+        <text x="26" y="32" class="node-subtitle" fill="${color}">${escapeHtml(task.status.toUpperCase())}</text>
+        <circle cx="250" cy="28" r="4" fill="${color}" />
+        <text x="16" y="64" class="node-title">${escapeHtml(truncate(task.title, 28))}</text>
+        <text x="16" y="84" class="node-subtitle">scope: ${scopeLabel}</text>
+        <text x="16" y="100" class="node-foot">${summary}</text>
+      </g>`;
     })
     .join('');
 
@@ -404,7 +399,7 @@ function buildRunViewModel(payload: RunPayload, requestedTaskId?: string | null)
     })),
     selectedTaskId: selectedTask?.id || null,
     counts,
-    graph: buildGraph(payload.run.id, tasks, selectedTask?.id || null),
+    graph: buildGraph(tasks, selectedTask?.id || null),
   };
 }
 
@@ -538,18 +533,16 @@ function buildRunsListPayload() {
 }
 
 function buildActionsHtml(run: UiRunViewModel['run'], plan: UiRunViewModel['plan']) {
-  const runId = encodeURIComponent(run.id);
-
   if (run.status === 'awaiting_plan_approval' && plan?.status === 'proposed') {
     return `<div class="actions">
-        <button class="btn-primary" id="approve-plan">Approve Plan</button>
-        <button class="btn-danger" id="reject-plan">Reject Plan</button>
+        <button class="btn-primary" id="approve-plan" type="button">Approve Plan</button>
+        <button class="btn-danger" id="reject-plan" type="button">Reject Plan</button>
       </div>`;
   }
 
   if (run.status === 'running' || run.status === 'healing') {
     return `<div class="actions">
-      <button class="btn-secondary" id="cancel-run">Cancel Active Run</button>
+      <button class="btn-secondary" id="cancel-run" type="button">Cancel Active Run</button>
     </div>`;
   }
 
@@ -662,9 +655,7 @@ function buildTaskListHtml(tasks: UiTask[], selectedTaskId: string | null) {
       const active = selectedTaskId === task.id;
       const dependencyCount = task.dependencies.length;
 
-      return `<a class="task-list-item${active ? ' active' : ''}" href="/runs/${encodeURIComponent(
-        task.runId,
-      )}?task=${encodeURIComponent(task.id)}" data-task-id="${safeText(task.id)}">
+      return `<button type="button" class="task-list-item${active ? ' active' : ''}" data-task-id="${safeText(task.id)}">
         <div class="task-list-top">
           <div class="task-list-title">${safeText(task.title)}</div>
           ${renderStatusBadgeHtml(task.status)}
@@ -678,7 +669,7 @@ function buildTaskListHtml(tasks: UiTask[], selectedTaskId: string | null) {
           <span>scope: ${safeText((task.writeScope || ['.']).join(', '))}</span>
           <span>${dependencyCount ? `${dependencyCount} dependenc${dependencyCount === 1 ? 'y' : 'ies'}` : 'no deps'}</span>
         </div>
-      </a>`;
+      </button>`;
     })
     .join('');
 }
@@ -784,8 +775,7 @@ const GLOBAL_CSS = `
   }
   a { text-decoration: none; color: inherit; }
   pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.5; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; color: var(--text-muted); }
-  
-  /* Sidenav */
+
   .sidenav {
     width: 280px; min-width: 280px;
     background: var(--bg-sidenav);
@@ -813,15 +803,13 @@ const GLOBAL_CSS = `
   .run-nav-item:hover { background: var(--bg-surface); color: var(--text-main); }
   .run-nav-item.active { background: var(--bg-surface); color: var(--text-main); border-color: var(--border); }
   .run-nav-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .run-nav-meta { font-size: 11px; display: flex; justify-content: space-between; align-items: center; }
+  .run-nav-meta { font-size: 11px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
   .run-nav-status { display: flex; align-items: center; gap: 4px; }
   .status-dot { width: 6px; height: 6px; border-radius: 50%; }
 
-  /* Main View Common */
   .main-content { flex: 1; overflow-y: auto; position: relative; display: flex; flex-direction: column; }
   .muted { color: var(--text-muted); }
-  
-  /* Scrollbars */
+
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 10px; }
@@ -851,7 +839,6 @@ function buildHomePageShell(): string {
       }
       .stat-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); font-weight: 600; }
       .stat-value { font-size: 32px; font-weight: 300; }
-      .hidden-tools { display: none; }
     </style>
   </head>
   <body>
@@ -931,7 +918,8 @@ function buildHomePageShell(): string {
       }
 
       document.getElementById('runs-search').addEventListener('input', () => renderRunsList(filterRuns(allRuns)));
-      loadRuns(); setInterval(loadRuns, 5000);
+      loadRuns();
+      setInterval(loadRuns, 5000);
     </script>
   </body>
 </html>`;
@@ -968,8 +956,8 @@ function renderRunPage(
       .topbar-titles .subtle { font-size: 14px; line-height: 1.5; color: var(--text-muted); max-width: 800px; }
       
       .actions { display: flex; gap: 12px; }
-      button { border: none; border-radius: 8px; padding: 10px 16px; font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; }
-      button:hover { opacity: 0.9; }
+      button { border: none; border-radius: 8px; padding: 10px 16px; font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity 0.2s, border-color 0.2s, background 0.2s; }
+      button:hover { opacity: 0.95; }
       button:disabled { opacity: 0.5; cursor: not-allowed; }
       .btn-primary { background: var(--text-main); color: var(--bg-app); }
       .btn-secondary { background: var(--bg-surface); border: 1px solid var(--border); color: var(--text-main); }
@@ -992,19 +980,22 @@ function renderRunPage(
       .section-header h2 { margin: 0; font-size: 16px; font-weight: 500; }
       .section-note { font-size: 13px; color: var(--text-muted); }
 
-      .graph-shell { position: relative; background: var(--bg-app); border: 1px solid var(--border); border-radius: var(--radius); min-height: 400px; overflow: hidden; }
+      .graph-shell { position: relative; background: var(--bg-app); border: 1px solid var(--border); border-radius: var(--radius); min-height: 420px; overflow: hidden; }
       .graph-shell::before { content: ''; position: absolute; inset: 0; background-image: radial-gradient(circle at center, #27272a 1px, transparent 1px); background-size: 24px 24px; opacity: 0.4; pointer-events: none; }
-      .graph-toolbar { position: absolute; top: 16px; left: 16px; display: flex; gap: 8px; z-index: 2; }
+      .graph-toolbar { position: absolute; top: 16px; left: 16px; display: flex; gap: 8px; z-index: 2; flex-wrap: wrap; }
       .toolbar-chip { background: rgba(24,24,27,0.8); backdrop-filter: blur(8px); border: 1px solid var(--border); padding: 6px 12px; border-radius: 99px; font-size: 12px; font-weight: 500; color: var(--text-muted); }
       .graph-scroll { overflow: auto; padding: 60px 20px 20px; }
       
       .lane-label { fill: var(--text-main); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
       .lane-sub { fill: var(--text-muted); font-size: 11px; }
-      .node-group { cursor: pointer; transition: transform 0.1s; }
-      .node-group:hover { transform: translateY(-2px); }
-      .node-title { fill: var(--text-main); font-size: 14px; font-weight: 600; }
-      .node-subtitle { fill: var(--text-muted); font-size: 11px; font-family: monospace; }
-      .node-foot { fill: var(--text-muted); font-size: 12px; }
+      .node-group { cursor: pointer; }
+      .node-hitbox { fill: transparent; pointer-events: all; }
+      .node-card { transition: stroke 0.15s ease, fill 0.15s ease; }
+      .node-group:hover .node-card { stroke: #52525b; }
+      .node-group.active .node-card { stroke-width: 1.75; }
+      .node-title { fill: var(--text-main); font-size: 14px; font-weight: 600; pointer-events: none; }
+      .node-subtitle { fill: var(--text-muted); font-size: 11px; font-family: monospace; pointer-events: none; }
+      .node-foot { fill: var(--text-muted); font-size: 12px; pointer-events: none; }
 
       .kv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
       .task-card, .event-card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
@@ -1014,18 +1005,49 @@ function renderRunPage(
       .chip { padding: 4px 10px; border-radius: 99px; background: var(--bg-app); border: 1px solid var(--border); font-size: 11px; color: var(--text-muted); }
       
       .task-list { display: flex; flex-direction: column; gap: 8px; }
-      .task-list-item { display: flex; flex-direction: column; padding: 16px; background: var(--bg-surface); border: 1px solid transparent; border-radius: 10px; transition: all 0.15s; }
-      .task-list-item:hover { border-color: var(--border); }
-      .task-list-item.active { border-color: var(--border); background: #27272a40; }
-      .task-list-top { display: flex; justify-content: space-between; align-items: flex-start; }
-      .task-list-title { font-weight: 500; font-size: 14px; }
-      .task-list-meta { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-muted); }
+      .task-list-item {
+        display: flex;
+        flex-direction: column;
+        padding: 16px;
+        background: var(--bg-surface);
+        border: 1px solid rgba(63, 63, 70, 0.55);
+        border-radius: 10px;
+        transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
+        width: 100%;
+        text-align: left;
+        cursor: pointer;
+        font-family: inherit;
+        color: var(--text-main);
+        appearance: none;
+        -webkit-appearance: none;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.02);
+      }
+      .task-list-item:hover {
+        border-color: #52525b;
+        background: linear-gradient(180deg, rgba(39,39,42,0.95), rgba(24,24,27,0.98));
+        box-shadow: 0 10px 24px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.04);
+        transform: translateY(-1px);
+      }
+      .task-list-item:focus-visible {
+        outline: none;
+        border-color: #71717a;
+        box-shadow: 0 0 0 3px rgba(113,113,122,0.22);
+      }
+      .task-list-item.active {
+        border-color: #a1a1aa;
+        background: linear-gradient(180deg, rgba(39,39,42,1), rgba(24,24,27,1));
+        box-shadow: 0 0 0 1px rgba(161,161,170,0.25), 0 14px 30px rgba(0,0,0,0.32);
+        transform: translateY(-1px);
+      }
+      .task-list-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+      .task-list-title { font-weight: 500; font-size: 14px; color: var(--text-main); }
+      .task-list-meta { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-muted); gap: 12px; }
       
       .timeline { position: relative; display: flex; flex-direction: column; gap: 16px; }
       .timeline::before { content: ''; position: absolute; left: 7px; top: 8px; bottom: 8px; width: 2px; background: var(--border); }
       .timeline-item { position: relative; padding-left: 28px; }
       .timeline-dot { position: absolute; left: 0; top: 12px; width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--border); }
-      .event-top { display: flex; justify-content: space-between; align-items: center; }
+      .event-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 
       .filters-row { display: flex; gap: 12px; margin-bottom: 12px; }
       .input-base { background: var(--bg-surface); border: 1px solid var(--border); color: var(--text-main); padding: 10px 14px; border-radius: 8px; font-size: 13px; flex: 1; outline: none; }
@@ -1141,7 +1163,6 @@ function renderRunPage(
       function formatDate(v) { return v ? new Date(v).toLocaleString() : '—'; }
       function statusBadge(s) { const c = statusColors[s]||'#d1d5db'; return \`<span class="status-badge" style="background:\${c}15;color:\${c};border:1px solid \${c}30;">\${safe(s.replaceAll('_',' '))}</span>\`; }
 
-      // --- Sidenav Logic ---
       let allRuns = [];
       function renderRunsList(items) {
         const container = document.getElementById('runs');
@@ -1158,6 +1179,7 @@ function renderRunPage(
           </a>\`;
         }).join('');
       }
+
       async function loadSidenavRuns() {
         const res = await fetch('/api/runs');
         allRuns = await res.json();
@@ -1167,7 +1189,6 @@ function renderRunPage(
       }
       document.getElementById('runs-search').addEventListener('input', loadSidenavRuns);
 
-      // --- Data Processing Helpers ---
       function normalizeTasks(run, plan, tasks) {
         if (tasks && tasks.length) return tasks.slice().sort((l,r)=>l.orderIndex-r.orderIndex).map(t=>({...t, writeScope: t.writeScope||['.'], dependencies: t.dependencies||[]}));
         const drafts = plan?.rawPlan?.tasks || [];
@@ -1213,7 +1234,13 @@ function renderRunPage(
         window.history.replaceState({}, '', u.toString());
       }
 
-      // --- UI Renderers ---
+      function scrollSelectedNodeIntoView() {
+        const node = document.querySelector('.node-group.active');
+        if (node) {
+          node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+        }
+      }
+
       function updateTopbar(run, plan, counts) {
         document.getElementById('hero-title').textContent = run.projectName + ' · ' + run.id;
         document.getElementById('hero-summary').textContent = plan?.summary || run.summary || run.prompt;
@@ -1230,16 +1257,38 @@ function renderRunPage(
         const actions = document.getElementById('actions');
         let actHtml = '';
         if (run.status === 'awaiting_plan_approval' && plan?.status === 'proposed') {
-          actHtml = \`<button class="btn-primary" id="approve-plan">Approve Plan</button> <button class="btn-danger" id="reject-plan">Reject</button>\`;
+          actHtml = \`<button class="btn-primary" id="approve-plan" type="button">Approve Plan</button> <button class="btn-danger" id="reject-plan" type="button">Reject</button>\`;
         } else if (run.status === 'running' || run.status === 'healing') {
-          actHtml = \`<button class="btn-secondary" id="cancel-run">Cancel Run</button>\`;
+          actHtml = \`<button class="btn-secondary" id="cancel-run" type="button">Cancel Run</button>\`;
         }
         actions.innerHTML = actHtml;
 
-        const bind = (id, fn) => { const el = document.getElementById(id); if(el) el.onclick = async () => { el.disabled = true; await fn(); await loadRunData(); }; }
-        bind('approve-plan', () => fetch('/api/runs/'+currentRunId+'/approve-plan', {method:'POST', body:'{}'}));
-        bind('reject-plan', () => fetch('/api/runs/'+currentRunId+'/reject-plan', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({reason: document.getElementById('reject-reason').value})}));
-        bind('cancel-run', () => fetch('/api/runs/'+currentRunId+'/cancel', {method:'POST', body:'{}'}));
+        const bind = (id, fn) => {
+          const el = document.getElementById(id);
+          if(el) el.onclick = async () => {
+            el.disabled = true;
+            await fn();
+            await loadRunData();
+          };
+        };
+
+        bind('approve-plan', () => fetch('/api/runs/'+currentRunId+'/approve-plan', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({})
+        }));
+
+        bind('reject-plan', () => fetch('/api/runs/'+currentRunId+'/reject-plan', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({reason: document.getElementById('reject-reason').value})
+        }));
+
+        bind('cancel-run', () => fetch('/api/runs/'+currentRunId+'/cancel', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({})
+        }));
       }
 
       function renderGraph(tasks, run) {
@@ -1256,9 +1305,11 @@ function renderRunPage(
         
         const w = mx*2 + levels.length*nw + Math.max(0, levels.length-1)*cg;
         const h = my + maxR*rg + 90;
-        stage.setAttribute('viewBox', \`0 0 \${w} \${h}\`); stage.setAttribute('width', w); stage.setAttribute('height', h);
+        stage.setAttribute('viewBox', \`0 0 \${w} \${h}\`);
+        stage.setAttribute('width', w);
+        stage.setAttribute('height', h);
 
-        const lanes = levels.map((c, i) => \`<text x="\${mx+i*(nw+cg)}" y="36" class="lane-label">Phase \${i+1}</text><text x="\${mx+i*(nw+cg)}" y="56" class="lane-sub">\${c.length} nodes</text>\`).join('');
+        const lanes = levels.map((c, i) => \`<text x="\${mx+i*(nw+cg)}" y="36" class="lane-label">Phase \${i+1}</text><text x="\${mx+i*(nw+cg)}" y="56" class="lane-sub">\${c.length} node(s)</text>\`).join('');
         const edges = tasks.flatMap(t => {
           const tgt = pos.get(t.id); if(!tgt) return [];
           return (t.dependencies||[]).map(d => {
@@ -1270,14 +1321,17 @@ function renderRunPage(
 
         const nodes = tasks.map(t => {
           const p = pos.get(t.id), c = statusColors[t.status]||'#d1d5db', act = selectedTaskId===t.id;
-          const stroke = act ? c : '#3f3f46', glow = act ? \`drop-shadow(0 0 10px \${c}40)\` : 'none';
+          const stroke = act ? c : '#3f3f46';
+          const glow = act ? \`drop-shadow(0 0 10px \${c}40)\` : 'none';
           return \`<g class="node-group\${act?' active':''}" data-task-id="\${safe(t.id)}" transform="translate(\${p.x} \${p.y})" style="filter:\${glow}">
-            <rect x="0" y="0" rx="12" ry="12" width="\${nw}" height="\${nh}" fill="#18181b" stroke="\${stroke}" stroke-width="1.5"/>
+            <rect class="node-hitbox" x="-8" y="-8" rx="16" ry="16" width="\${nw+16}" height="\${nh+16}" />
+            <rect class="node-card" x="0" y="0" rx="12" ry="12" width="\${nw}" height="\${nh}" fill="#18181b" stroke="\${stroke}" stroke-width="1.5"/>
             <rect x="16" y="16" rx="6" ry="6" width="68" height="24" fill="\${c}15" stroke="\${c}30" />
             <text x="26" y="32" class="node-subtitle" fill="\${c}">\${safe(t.status.toUpperCase())}</text>
             <circle cx="250" cy="28" r="4" fill="\${c}" />
             <text x="16" y="64" class="node-title">\${safe(truncate(t.title, 28))}</text>
             <text x="16" y="84" class="node-subtitle">scope: \${safe(truncate((t.writeScope||['.']).join(', '), 26))}</text>
+            <text x="16" y="100" class="node-foot">\${safe(truncate(t.outputSummary || t.validationSummary || t.prompt || '', 44))}</text>
           </g>\`;
         }).join('');
 
@@ -1287,27 +1341,38 @@ function renderRunPage(
         document.getElementById('graph-selection-chip').textContent = selT ? 'Inspecting: '+selT.title : 'No selection';
 
         stage.querySelectorAll('.node-group').forEach(n => {
-          n.addEventListener('click', () => { selectedTaskId = n.getAttribute('data-task-id'); syncUrl(); renderAll(); });
+          n.addEventListener('click', (event) => {
+            event.preventDefault();
+            selectedTaskId = n.getAttribute('data-task-id');
+            syncUrl();
+            renderAll();
+            scrollSelectedNodeIntoView();
+          });
         });
       }
 
       function renderLists(tasks, events, artifacts) {
-        // Tasks
         const visibleT = tasks.filter(t => {
-          const s = !taskSearch || [t.title, t.prompt].join(' ').toLowerCase().includes(taskSearch);
+          const s = !taskSearch || [t.title, t.prompt, t.outputSummary].join(' ').toLowerCase().includes(taskSearch);
           const f = taskStatusFilter === 'all' || t.status === taskStatusFilter;
           return s && f;
         });
+
         document.getElementById('task-list').innerHTML = visibleT.length ? visibleT.map(t => {
           const act = selectedTaskId === t.id ? ' active' : '';
-          return \`<button class="task-list-item\${act}" data-tl-id="\${safe(t.id)}" style="text-align:left; cursor:pointer; width:100%; font-family:inherit;">
+          return \`<button type="button" class="task-list-item\${act}" data-tl-id="\${safe(t.id)}">
             <div class="task-list-top"><div class="task-list-title">\${safe(t.title)}</div>\${statusBadge(t.status)}</div>
             <div class="chip-row" style="margin-top:8px;"><span class="chip">\${safe(t.kind||'implement')}</span><span class="chip">attempts \${t.attempts||0}</span></div>
+            <div class="task-list-meta" style="margin-top:12px;"><span>scope: \${safe((t.writeScope||['.']).join(', '))}</span><span>\${t.dependencies?.length ? t.dependencies.length + ' deps' : 'no deps'}</span></div>
           </button>\`;
         }).join('') : '<div class="muted">No tasks match.</div>';
-        document.querySelectorAll('[data-tl-id]').forEach(b => b.addEventListener('click', () => { selectedTaskId = b.getAttribute('data-tl-id'); syncUrl(); renderAll(); }));
 
-        // Events
+        document.querySelectorAll('[data-tl-id]').forEach(b => b.addEventListener('click', () => {
+          selectedTaskId = b.getAttribute('data-tl-id');
+          syncUrl();
+          renderAll();
+        }));
+
         document.getElementById('events').innerHTML = events.length ? events.slice().reverse().map(e => {
           const c = e.level==='error'?'#f87171':e.level==='warning'?'#facc15':'#60a5fa';
           return \`<div class="timeline-item"><div class="timeline-dot" style="background:\${c}; box-shadow:0 0 0 4px #09090b"></div>
@@ -1315,7 +1380,6 @@ function renderRunPage(
             <div style="font-size:13px; margin-top:6px; color:var(--text-muted)">\${safe(e.message)}</div></div></div>\`;
         }).join('') : '<div class="muted">No events.</div>';
 
-        // Inspector & Artifacts
         const t = tasks.find(c => c.id === selectedTaskId);
         if(!t) {
           document.getElementById('task-inspector').innerHTML = '<div class="muted">Select a task.</div>';
@@ -1324,7 +1388,7 @@ function renderRunPage(
         }
         
         document.getElementById('task-inspector').innerHTML = \`<div style="display:flex; flex-direction:column; gap:16px;">
-          <div style="display:flex; justify-content:space-between; font-weight:600;">\${safe(t.title)}\${statusBadge(t.status)}</div>
+          <div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start;"><div style="font-weight:600;">\${safe(t.title)}</div>\${statusBadge(t.status)}</div>
           <div class="kv-grid">
             <div class="meta-card"><div class="meta-label">Scope</div><div class="meta-value" style="font-size:12px; font-weight:normal">\${safe((t.writeScope||['.']).join(', '))}</div></div>
             <div class="meta-card"><div class="meta-label">Dependencies</div><div class="meta-value" style="font-size:12px; font-weight:normal">\${t.dependencies.length?t.dependencies.length:'None'}</div></div>
@@ -1334,7 +1398,7 @@ function renderRunPage(
 
         const arts = artifacts.filter(a => a.taskId === t.id);
         document.getElementById('task-artifacts').innerHTML = arts.length ? arts.map(a => \`<div class="task-card" style="margin-bottom:8px;">
-          <div style="display:flex; justify-content:space-between; margin-bottom:8px; font-size:12px;"><strong>\${safe(a.type)}</strong><span class="muted">\${formatDate(a.createdAt)}</span></div>
+          <div style="display:flex; justify-content:space-between; margin-bottom:8px; font-size:12px; gap:12px;"><strong>\${safe(a.type)}</strong><span class="muted">\${formatDate(a.createdAt)}</span></div>
           <pre>\${safe(a.content ? a.content.slice(0,800) : 'binary')}</pre></div>\`).join('') : '<div class="muted">No artifacts stored.</div>';
       }
 
@@ -1362,8 +1426,15 @@ function renderRunPage(
       document.getElementById('task-search').addEventListener('input', e => { taskSearch = e.target.value.toLowerCase(); renderAll(); });
       document.getElementById('task-status-filter').addEventListener('change', e => { taskStatusFilter = e.target.value; renderAll(); });
 
-      loadSidenavRuns(); setInterval(loadSidenavRuns, 5000);
-      if(latestPayload) renderAll(); else loadRunData();
+      loadSidenavRuns();
+      setInterval(loadSidenavRuns, 5000);
+
+      if(latestPayload) {
+        renderAll();
+      } else {
+        loadRunData();
+      }
+
       setInterval(loadRunData, 4000);
     </script>
   </body>
