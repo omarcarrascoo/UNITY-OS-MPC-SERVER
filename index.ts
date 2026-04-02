@@ -3,6 +3,7 @@ import 'dotenv/config';
 import { getRuntimeConfig, WORKSPACE_DIR } from './src/config.js';
 import { RuntimeState } from './src/runtime/state.js';
 import { registerDiscordHandlers } from './src/transports/discord/register-handlers.js';
+import { startUnityHttpServer } from './src/transports/http/server.js';
 
 const config = getRuntimeConfig();
 const runtime = new RuntimeState();
@@ -22,6 +23,7 @@ console.log('BOOT DEBUG', {
 });
 
 registerDiscordHandlers(client, runtime);
+startUnityHttpServer(runtime);
 
 client.login(config.discordToken);
 console.log('🤖 Jarvis Architect listening on Discord...');

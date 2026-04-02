@@ -1,4 +1,5 @@
 import path from 'path';
+import { getRuntimeConfig, getProjectByName } from '../config.js';
 import { getFigmaContext } from '../figma.js';
 import { prepareWorkspace } from '../git.js';
 import { getProjectMemory, getProjectTree } from '../scanner.js';
@@ -8,6 +9,7 @@ import type {
   PlanTaskDraft,
   ReviewResult,
   RunPlanDraft,
+  RunMode,
   RunRecord,
   TaskExecutionOutcome,
   TaskRecord,
@@ -34,6 +36,28 @@ interface RunAutonomousAgentParams {
   project: WorkspaceProject;
   prompt: string;
   channelName: string;
+  mode?: RunMode;
+  signal?: AbortSignal;
+  onProgress?: (message: string) => Promise<void>;
+}
+
+interface CreateAutonomousRunPlanResult {
+  runId: string;
+  branchName: string;
+  defaultBranch: string;
+  planSummary: string;
+  consoleUrl: string;
+  requiresApproval: boolean;
+  autoApproved: boolean;
+  tasks: Array<{
+    title: string;
+    writeScope: string[];
+    dependencies: string[];
+  }>;
+}
+
+interface ResumeAutonomousRunParams {
+  runId: string;
   signal?: AbortSignal;
   onProgress?: (message: string) => Promise<void>;
 }
@@ -291,6 +315,7 @@ function buildRunRecord(
   policy: AutonomousRunPolicy,
   branchName: string,
   defaultBranch: string,
+  mode: RunMode,
 ): RunRecord {
   const timestamp = nowIso();
 
@@ -300,7 +325,7 @@ function buildRunRecord(
     channelName,
     prompt,
     status: 'planning',
-    mode: 'interactive',
+    mode,
     branchName,
     defaultBranch,
     maxParallelTasks: policy.maxParallelTasks,
@@ -314,6 +339,11 @@ function buildRunRecord(
     finishedAt: null,
     summary: null,
   };
+}
+
+function buildConsoleRunUrl(runId: string): string {
+  const config = getRuntimeConfig();
+  return `http://localhost:${config.localConsolePort}/runs/${runId}`;
 }
 
 function createTasksFromPlan(runId: string, plan: RunPlanDraft): TaskRecord[] {
@@ -590,85 +620,45 @@ function formatRunSummary(
   ].join('\n');
 }
 
-export async function runAutonomousAgent({
-  project,
-  prompt,
-  channelName,
-  signal,
-  onProgress,
-}: RunAutonomousAgentParams): Promise<RunAutonomousAgentResult> {
-  const policy = getProjectPolicy(unityStore, project.name);
-  unityStore.upsertPolicy(project.name, policy);
+function shouldAutoApprovePlan(mode: RunMode, policy: AutonomousRunPolicy): boolean {
+  return mode === 'nightly' && policy.autoApprovePlan;
+}
 
-  const baseWorkspace = await prepareWorkspace(project);
-  const branchState = await ensureIntegrationBranch(baseWorkspace, policy.integrationBranchName);
-  const baselineStaticResults = await runStaticGates(baseWorkspace, policy);
-  const runId = createEntityId('run');
-  const run = buildRunRecord(
-    runId,
-    project.name,
-    channelName,
-    prompt,
-    policy,
-    branchState.integrationBranch,
-    branchState.defaultBranch,
-  );
+function loadBaselineStaticResults(runId: string): GateResult[] {
+  const baselineArtifact = unityStore
+    .listArtifactsByRun(runId)
+    .find((artifact) => artifact.type === 'baseline-static-gates');
 
-  unityStore.createRun(run);
-  unityStore.addEvent(createEntityId('event'), run.id, null, 'info', 'run.created', 'Autonomous run created.', {
-    project: project.name,
-    branch: branchState.integrationBranch,
-    branchCreated: branchState.created,
-  });
-  unityStore.addArtifact(
-    createEntityId('artifact'),
-    run.id,
-    null,
-    'baseline-static-gates',
-    JSON.stringify(baselineStaticResults, null, 2),
-    null,
-  );
-
-  if (onProgress) {
-    await onProgress(
-      `🤖 Autonomous run \`${run.id}\` started on \`${branchState.integrationBranch}\`${branchState.created ? ' (branch created upstream)' : ''}.`,
-    );
+  if (!baselineArtifact?.content) {
+    return [];
   }
 
-  const figmaData = await getFigmaContext(prompt);
-  const projectTree = getProjectTree(baseWorkspace.repoPath);
+  try {
+    return JSON.parse(baselineArtifact.content) as GateResult[];
+  } catch {
+    return [];
+  }
+}
+
+async function executeApprovedRun(
+  run: RunRecord,
+  project: WorkspaceProject,
+  plan: RunPlanDraft,
+  policy: AutonomousRunPolicy,
+  baseWorkspace: PreparedWorkspace,
+  baselineStaticResults: GateResult[],
+  signal?: AbortSignal,
+  onProgress?: (message: string) => Promise<void>,
+): Promise<RunAutonomousAgentResult> {
+  const figmaData = await getFigmaContext(run.prompt);
   const projectMemory = getProjectMemory(baseWorkspace.repoPath);
-  unityStore.upsertMemory(createEntityId('memory'), project.name, 'run_context', run.id, prompt, {
-    channelName,
-  });
+  const existingTasks = unityStore.listTasksByRun(run.id);
 
-  if (projectMemory) {
-    unityStore.upsertMemory(
-      createEntityId('memory'),
-      project.name,
-      'stable_repo',
-      'project_memory',
-      projectMemory,
-    );
-  }
-
-  const plan = await planAutonomousRun({
-    prompt,
-    projectTree,
-    projectMemory,
-  });
-
-  unityStore.createPlan(createEntityId('plan'), run.id, plan.summary, plan);
-  unityStore.addArtifact(createEntityId('artifact'), run.id, null, 'plan', JSON.stringify(plan, null, 2), null);
-  unityStore.updateRun(run.id, { status: 'running' });
-
-  if (onProgress) {
-    await onProgress(`🗺️ Plan ready: ${plan.summary}`);
-  }
-
-  const initialTasks = createTasksFromPlan(run.id, plan);
-  for (const task of initialTasks) {
-    unityStore.createTask(task);
+  if (existingTasks.length === 0) {
+    const initialTasks = createTasksFromPlan(run.id, plan);
+    for (const task of initialTasks) {
+      unityStore.createTask(task);
+    }
   }
 
   const deadline = Date.now() + policy.maxHours * 60 * 60 * 1000;
@@ -913,7 +903,7 @@ export async function runAutonomousAgent({
         ? `Run reached the max execution window of ${policy.maxHours} hour(s).`
         : gracefulDrainRequested
           ? `Run entered the final closing window and stopped scheduling new work to finish cleanly.`
-        : `Run reached the max commit budget of ${policy.maxCommits}.`;
+          : `Run reached the max commit budget of ${policy.maxCommits}.`;
 
     for (const task of unityStore.listTasksByRun(run.id).filter((candidate) => candidate.status === 'pending')) {
       unityStore.updateTask(task.id, {
@@ -1017,4 +1007,303 @@ export async function runAutonomousAgent({
       commitMessage: task.commitMessage,
     })),
   };
+}
+
+export async function createAutonomousRunPlan({
+  project,
+  prompt,
+  channelName,
+  mode = 'interactive',
+  signal,
+  onProgress,
+}: RunAutonomousAgentParams): Promise<CreateAutonomousRunPlanResult> {
+  const policy = getProjectPolicy(unityStore, project.name);
+  unityStore.upsertPolicy(project.name, policy);
+
+  const baseWorkspace = await prepareWorkspace(project);
+  const branchState = await ensureIntegrationBranch(baseWorkspace, policy.integrationBranchName);
+  const baselineStaticResults = await runStaticGates(baseWorkspace, policy);
+  const runId = createEntityId('run');
+  const run = buildRunRecord(
+    runId,
+    project.name,
+    channelName,
+    prompt,
+    policy,
+    branchState.integrationBranch,
+    branchState.defaultBranch,
+    mode,
+  );
+
+  unityStore.createRun(run);
+  unityStore.addEvent(createEntityId('event'), run.id, null, 'info', 'run.created', 'Autonomous run created.', {
+    project: project.name,
+    branch: branchState.integrationBranch,
+    branchCreated: branchState.created,
+    mode,
+  });
+  unityStore.addArtifact(
+    createEntityId('artifact'),
+    run.id,
+    null,
+    'baseline-static-gates',
+    JSON.stringify(baselineStaticResults, null, 2),
+    null,
+  );
+
+  if (onProgress) {
+    await onProgress(
+      `🤖 Autonomous run \`${run.id}\` started on \`${branchState.integrationBranch}\`${branchState.created ? ' (branch created upstream)' : ''}.`,
+    );
+  }
+
+  const projectTree = getProjectTree(baseWorkspace.repoPath);
+  const projectMemory = getProjectMemory(baseWorkspace.repoPath);
+  unityStore.upsertMemory(createEntityId('memory'), project.name, 'run_context', run.id, prompt, {
+    channelName,
+    mode,
+  });
+
+  if (projectMemory) {
+    unityStore.upsertMemory(
+      createEntityId('memory'),
+      project.name,
+      'stable_repo',
+      'project_memory',
+      projectMemory,
+    );
+  }
+
+  if (signal?.aborted) {
+    throw new Error('AbortError');
+  }
+
+  const plan = await planAutonomousRun({
+    prompt,
+    projectTree,
+    projectMemory,
+  });
+
+  const autoApproved = shouldAutoApprovePlan(mode, policy);
+  const timestamp = nowIso();
+  const planId = createEntityId('plan');
+
+  unityStore.createPlan(planId, run.id, plan.summary, plan, {
+    status: autoApproved ? 'approved' : 'proposed',
+    version: 1,
+    approvedAt: autoApproved ? timestamp : null,
+    approvedBy: autoApproved ? 'policy:auto' : null,
+  });
+  unityStore.addArtifact(createEntityId('artifact'), run.id, null, 'plan', JSON.stringify(plan, null, 2), null);
+  unityStore.updateRun(run.id, {
+    status: autoApproved ? 'running' : 'awaiting_plan_approval',
+  });
+  unityStore.addEvent(
+    createEntityId('event'),
+    run.id,
+    null,
+    'info',
+    autoApproved ? 'plan.auto_approved' : 'plan.created',
+    autoApproved
+      ? `Plan auto-approved by policy.`
+      : `Plan created and awaiting approval in the local console.`,
+    {
+      planId,
+      summary: plan.summary,
+    },
+  );
+
+  if (onProgress) {
+    await onProgress(
+      autoApproved
+        ? `🗺️ Plan ready and auto-approved: ${plan.summary}`
+        : `🗺️ Plan ready: ${plan.summary}`,
+    );
+  }
+
+  return {
+    runId: run.id,
+    branchName: run.branchName,
+    defaultBranch: run.defaultBranch,
+    planSummary: plan.summary,
+    consoleUrl: buildConsoleRunUrl(run.id),
+    requiresApproval: !autoApproved,
+    autoApproved,
+    tasks: plan.tasks.map((task) => ({
+      title: task.title,
+      writeScope: task.writeScope,
+      dependencies: task.dependencies || [],
+    })),
+  };
+}
+
+export function approveAutonomousRunPlan(runId: string, approvedBy = 'local-ui'): void {
+  const run = unityStore.getRun(runId);
+  if (!run) {
+    throw new Error(`Run ${runId} was not found.`);
+  }
+
+  const plan = unityStore.getLatestPlanByRun(runId);
+  if (!plan) {
+    throw new Error(`Run ${runId} has no persisted plan.`);
+  }
+
+  if (plan.status === 'approved') {
+    return;
+  }
+
+  if (plan.status === 'rejected') {
+    throw new Error(`Run ${runId} has a rejected plan and cannot be approved without replanning.`);
+  }
+
+  const timestamp = nowIso();
+  unityStore.updatePlan(plan.id, {
+    status: 'approved',
+    approvedAt: timestamp,
+    approvedBy,
+    rejectedAt: null,
+    rejectedBy: null,
+    rejectedReason: null,
+  });
+  unityStore.updateRun(run.id, {
+    status: 'running',
+    finishedAt: null,
+  });
+  unityStore.addEvent(
+    createEntityId('event'),
+    run.id,
+    null,
+    'info',
+    'plan.approved',
+    `Plan approved by ${approvedBy}.`,
+  );
+}
+
+export function rejectAutonomousRunPlan(
+  runId: string,
+  rejectedBy = 'local-ui',
+  rejectedReason = 'Plan rejected from the local console.',
+): void {
+  const run = unityStore.getRun(runId);
+  if (!run) {
+    throw new Error(`Run ${runId} was not found.`);
+  }
+
+  const plan = unityStore.getLatestPlanByRun(runId);
+  if (!plan) {
+    throw new Error(`Run ${runId} has no persisted plan.`);
+  }
+
+  if (plan.status === 'approved' || run.status === 'running' || run.status === 'healing' || run.status === 'completed') {
+    throw new Error(`Run ${runId} has already moved past the approval stage.`);
+  }
+
+  const timestamp = nowIso();
+  unityStore.updatePlan(plan.id, {
+    status: 'rejected',
+    rejectedAt: timestamp,
+    rejectedBy,
+    rejectedReason,
+  });
+  unityStore.updateRun(run.id, {
+    status: 'plan_rejected',
+    finishedAt: timestamp,
+    summary: rejectedReason,
+  });
+  unityStore.addEvent(
+    createEntityId('event'),
+    run.id,
+    null,
+    'warning',
+    'plan.rejected',
+    rejectedReason,
+    {
+      rejectedBy,
+    },
+  );
+}
+
+export async function resumeAutonomousRun({
+  runId,
+  signal,
+  onProgress,
+}: ResumeAutonomousRunParams): Promise<RunAutonomousAgentResult> {
+  const run = unityStore.getRun(runId);
+  if (!run) {
+    throw new Error(`Run ${runId} was not found.`);
+  }
+
+  const planRecord = unityStore.getLatestPlanByRun(runId);
+  if (!planRecord) {
+    throw new Error(`Run ${runId} has no persisted plan.`);
+  }
+
+  if (planRecord.status !== 'approved') {
+    throw new Error(`Run ${runId} is not approved yet.`);
+  }
+
+  const project = getProjectByName(run.projectName);
+  const policy = getProjectPolicy(unityStore, project.name);
+  unityStore.upsertPolicy(project.name, policy);
+
+  const baseWorkspace = await prepareWorkspace(project);
+  await ensureIntegrationBranch(baseWorkspace, run.branchName);
+  let baselineStaticResults = loadBaselineStaticResults(runId);
+  if (baselineStaticResults.length === 0) {
+    baselineStaticResults = await runStaticGates(baseWorkspace, policy);
+    unityStore.addArtifact(
+      createEntityId('artifact'),
+      run.id,
+      null,
+      'baseline-static-gates',
+      JSON.stringify(baselineStaticResults, null, 2),
+      null,
+    );
+  }
+
+  unityStore.updateRun(run.id, {
+    status: 'running',
+    finishedAt: null,
+  });
+  unityStore.addEvent(
+    createEntityId('event'),
+    run.id,
+    null,
+    'info',
+    'run.resumed',
+    'Run resumed after plan approval.',
+  );
+
+  if (onProgress) {
+    await onProgress(`🚀 Resuming run \`${run.id}\` on \`${run.branchName}\`.`);
+  }
+
+  return executeApprovedRun(
+    unityStore.getRun(run.id) || run,
+    project,
+    planRecord.rawPlan,
+    policy,
+    baseWorkspace,
+    baselineStaticResults,
+    signal,
+    onProgress,
+  );
+}
+
+export async function runAutonomousAgent(
+  params: RunAutonomousAgentParams,
+): Promise<RunAutonomousAgentResult> {
+  const planned = await createAutonomousRunPlan(params);
+
+  if (planned.requiresApproval) {
+    throw new Error(
+      `Run ${planned.runId} is waiting for plan approval. Use createAutonomousRunPlan + resumeAutonomousRun for interactive flows.`,
+    );
+  }
+
+  return resumeAutonomousRun({
+    runId: planned.runId,
+    signal: params.signal,
+    onProgress: params.onProgress,
+  });
 }

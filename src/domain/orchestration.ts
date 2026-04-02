@@ -9,11 +9,17 @@ export type AgentRole =
 export type RunStatus =
   | 'queued'
   | 'planning'
+  | 'awaiting_plan_approval'
+  | 'plan_rejected'
   | 'running'
   | 'healing'
   | 'completed'
   | 'failed'
   | 'cancelled';
+
+export type RunMode = 'interactive' | 'nightly';
+
+export type PlanStatus = 'proposed' | 'approved' | 'rejected' | 'superseded';
 
 export type TaskStatus =
   | 'pending'
@@ -39,7 +45,7 @@ export interface RunRecord {
   channelName: string;
   prompt: string;
   status: RunStatus;
-  mode: 'interactive' | 'nightly';
+  mode: RunMode;
   branchName: string;
   defaultBranch: string;
   maxParallelTasks: number;
@@ -52,6 +58,21 @@ export interface RunRecord {
   startedAt?: string | null;
   finishedAt?: string | null;
   summary?: string | null;
+}
+
+export interface PlanRecord {
+  id: string;
+  runId: string;
+  summary: string;
+  rawPlan: RunPlanDraft;
+  status: PlanStatus;
+  version: number;
+  createdAt: string;
+  approvedAt?: string | null;
+  approvedBy?: string | null;
+  rejectedAt?: string | null;
+  rejectedBy?: string | null;
+  rejectedReason?: string | null;
 }
 
 export interface TaskRecord {
@@ -113,6 +134,28 @@ export interface GateResult {
   details: string;
 }
 
+export interface RunEventRecord {
+  id: string;
+  runId: string;
+  taskId?: string | null;
+  level: 'info' | 'warning' | 'error';
+  type: string;
+  message: string;
+  payload?: unknown;
+  createdAt: string;
+}
+
+export interface ArtifactRecord {
+  id: string;
+  runId: string;
+  taskId?: string | null;
+  type: string;
+  path?: string | null;
+  content?: string | null;
+  metadata?: unknown;
+  createdAt: string;
+}
+
 export interface TaskExecutionOutcome {
   taskId: string;
   status: TaskStatus;
@@ -124,4 +167,3 @@ export interface TaskExecutionOutcome {
   targetRoute?: string;
   tokenUsage?: number;
 }
-

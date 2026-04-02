@@ -24,6 +24,7 @@ export interface RuntimeConfig {
   manualChannelName: string;
   autonomousChannelName: string;
   integrationBranchName: string;
+  localConsolePort: number;
 }
 
 function getRequiredEnv(name: string): string {
@@ -50,7 +51,8 @@ export function getRuntimeConfig(): RuntimeConfig {
     deepseekApiKey: process.env.DEEPSEEK_API_KEY,
     manualChannelName: process.env.UNITY_MANUAL_CHANNEL || 'jarvis-dev',
     autonomousChannelName: process.env.UNITY_AUTONOMOUS_CHANNEL || 'unity-agent',
-    integrationBranchName: process.env.UNITY_INTEGRATION_BRANCH || 'per-development2',
+    integrationBranchName: process.env.UNITY_INTEGRATION_BRANCH || 'unity-per-development2221223',
+    localConsolePort: Number(process.env.UNITY_LOCAL_CONSOLE_PORT || 4477),
   };
 }
 

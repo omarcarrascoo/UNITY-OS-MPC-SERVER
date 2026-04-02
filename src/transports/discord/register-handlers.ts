@@ -9,7 +9,7 @@ import {
   Message,
 } from 'discord.js';
 import { approveSession } from '../../application/approve-session.js';
-import { runAutonomousAgent } from '../../application/run-autonomous-agent.js';
+import { createAutonomousRunPlan } from '../../application/run-autonomous-agent.js';
 import { runDevelopmentTask } from '../../application/run-development-task.js';
 import { initProject } from '../../application/projects/init-project.js';
 import { rejectSession } from '../../application/reject-session.js';
@@ -64,33 +64,6 @@ async function sendChunkedThreadMessages(thread: any, content: string): Promise<
   for (const chunk of chunkDiscordContent(content)) {
     await thread.send(chunk).catch(() => {});
   }
-}
-
-function buildAutonomousHeadline(result: {
-  runId: string;
-  branchName: string;
-  defaultBranch: string;
-  commitsCreated: number;
-  runtimeUrls: { localUrl: string | null; publicUrl: string | null };
-  tasks: Array<{ status: string }>;
-}): string {
-  const succeeded = result.tasks.filter((task) => task.status === 'succeeded').length;
-  const failed = result.tasks.filter((task) => task.status === 'failed').length;
-  const blocked = result.tasks.filter((task) => task.status === 'blocked').length;
-  const skipped = result.tasks.filter((task) => task.status === 'skipped').length;
-
-  return [
-    '✅ **Unity Agent Run Complete**',
-    `🆔 Run: \`${result.runId}\``,
-    `🌿 Branch: \`${result.branchName}\``,
-    `🔀 Merge target later: \`${result.defaultBranch}\``,
-    `🧱 Commits created: \`${result.commitsCreated}\``,
-    `📊 Tasks: succeeded \`${succeeded}\` | failed \`${failed}\` | blocked \`${blocked}\` | skipped \`${skipped}\``,
-    `🏠 Local: ${result.runtimeUrls.localUrl || 'Unavailable'}`,
-    `📱 Public: ${result.runtimeUrls.publicUrl || 'Unavailable'}`,
-    '',
-    'Detailed summary posted in the thread.',
-  ].join('\n');
 }
 
 function buildSessionButtonId(
@@ -186,10 +159,11 @@ export function registerDiscordHandlers(client: Client, runtime: RuntimeState): 
       });
 
       try {
-        const result = await runAutonomousAgent({
+        const result = await createAutonomousRunPlan({
           project,
           prompt: message.content,
           channelName,
+          mode: 'interactive',
           signal: abortController.signal,
           onProgress: async (progressMessage) => {
             await thread.send(progressMessage).catch(() => {});
@@ -197,18 +171,35 @@ export function registerDiscordHandlers(client: Client, runtime: RuntimeState): 
         });
 
         const taskLines = result.tasks
-          .map((task) => `- ${task.status.toUpperCase()} ${task.title}${task.commitMessage ? ` -> ${task.commitMessage}` : ''}`)
+          .map(
+            (task) =>
+              `- ${task.title}\n  scope: ${task.writeScope.join(', ')}${
+                task.dependencies.length ? `\n  deps: ${task.dependencies.join(', ')}` : ''
+              }`,
+          )
           .join('\n');
 
         await replyMessage.edit({
-          content: buildAutonomousHeadline(result),
+          content: [
+            '🗺️ **Unity Agent Plan Ready**',
+            `🆔 Run: \`${result.runId}\``,
+            `🌿 Branch: \`${result.branchName}\``,
+            `🔀 Merge target later: \`${result.defaultBranch}\``,
+            `🧠 Approval required: \`${result.requiresApproval ? 'yes' : 'no'}\``,
+            `🌐 Review plan: ${result.consoleUrl}`,
+            '',
+            'Approve or reject the plan from the local console.',
+          ].join('\n'),
           components: [],
         });
 
-        await sendChunkedThreadMessages(thread, `**Run Summary**\n${result.summary}`);
+        await sendChunkedThreadMessages(
+          thread,
+          `**Plan Summary**\n${result.planSummary}\n\n**Review in console**\n${result.consoleUrl}`,
+        );
 
         if (taskLines) {
-          await sendChunkedThreadMessages(thread, `**Task Results**\n${taskLines}`);
+          await sendChunkedThreadMessages(thread, `**Planned Tasks**\n${taskLines}`);
         }
 
         await thread.setArchived(true);
@@ -434,7 +425,7 @@ export function registerDiscordHandlers(client: Client, runtime: RuntimeState): 
       if (commandName === 'status') {
         const projectPolicy = getProjectPolicy(unityStore, runtime.getActiveProjectName());
         await interaction.reply(
-          `🤖 **Estado Actual:**\nJarvis está enfocado en el repositorio: \`${runtime.getActiveProjectName()}\`\nProcesando tarea: ${runtime.isProcessing() ? 'Sí 🔴' : 'No 🟢'}\nCanal manual: \`#${runtimeConfig.manualChannelName}\`\nCanal autónomo: \`#${runtimeConfig.autonomousChannelName}\`\nBranch autónoma: \`${projectPolicy.integrationBranchName}\`\nParalelismo: \`${projectPolicy.maxParallelTasks}\` | Retries: \`${projectPolicy.maxRetriesPerTask}\` | Horas: \`${projectPolicy.maxHours}\` | Commits: \`${projectPolicy.maxCommits}\``,
+          `🤖 **Estado Actual:**\nJarvis está enfocado en el repositorio: \`${runtime.getActiveProjectName()}\`\nProcesando tarea: ${runtime.isProcessing() ? 'Sí 🔴' : 'No 🟢'}\nCanal manual: \`#${runtimeConfig.manualChannelName}\`\nCanal autónomo: \`#${runtimeConfig.autonomousChannelName}\`\nConsola local: \`http://localhost:${runtimeConfig.localConsolePort}\`\nBranch autónoma: \`${projectPolicy.integrationBranchName}\`\nAutoapprove nightly plan: \`${projectPolicy.autoApprovePlan ? 'on' : 'off'}\`\nParalelismo: \`${projectPolicy.maxParallelTasks}\` | Retries: \`${projectPolicy.maxRetriesPerTask}\` | Horas: \`${projectPolicy.maxHours}\` | Commits: \`${projectPolicy.maxCommits}\``,
         );
         return;
       }
@@ -450,12 +441,14 @@ export function registerDiscordHandlers(client: Client, runtime: RuntimeState): 
           maxRetriesPerTask: interaction.options.getInteger('retries') ?? currentPolicy.maxRetriesPerTask,
           maxImprovementCycles:
             interaction.options.getInteger('improvements') ?? currentPolicy.maxImprovementCycles,
+          autoApprovePlan:
+            interaction.options.getBoolean('autoapproveplan') ?? currentPolicy.autoApprovePlan,
         });
 
         unityStore.upsertPolicy(projectName, updatedPolicy);
 
         await interaction.reply(
-          `⚙️ **Política actualizada para \`${projectName}\`**\nBranch: \`${updatedPolicy.integrationBranchName}\`\nHoras: \`${updatedPolicy.maxHours}\`\nCommits: \`${updatedPolicy.maxCommits}\`\nParalelismo: \`${updatedPolicy.maxParallelTasks}\`\nRetries: \`${updatedPolicy.maxRetriesPerTask}\`\nSelf-improvement cycles: \`${updatedPolicy.maxImprovementCycles}\``,
+          `⚙️ **Política actualizada para \`${projectName}\`**\nBranch: \`${updatedPolicy.integrationBranchName}\`\nAutoapprove nightly plan: \`${updatedPolicy.autoApprovePlan ? 'on' : 'off'}\`\nHoras: \`${updatedPolicy.maxHours}\`\nCommits: \`${updatedPolicy.maxCommits}\`\nParalelismo: \`${updatedPolicy.maxParallelTasks}\`\nRetries: \`${updatedPolicy.maxRetriesPerTask}\`\nSelf-improvement cycles: \`${updatedPolicy.maxImprovementCycles}\``,
         );
         return;
       }

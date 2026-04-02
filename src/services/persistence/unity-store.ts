@@ -3,8 +3,12 @@ import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
 import { DATA_DIR } from '../../config.js';
 import type {
+  ArtifactRecord,
   MemoryLayer,
+  PlanRecord,
+  PlanStatus,
   RunRecord,
+  RunEventRecord,
   RunStatus,
   TaskRecord,
   TaskStatus,
@@ -85,6 +89,49 @@ function mapTask(row: Record<string, unknown>): TaskRecord {
   };
 }
 
+function mapPlan(row: Record<string, unknown>): PlanRecord {
+  return {
+    id: String(row.id),
+    runId: String(row.run_id),
+    summary: String(row.summary),
+    rawPlan: parseJson(row.raw_plan, { summary: '', tasks: [] }),
+    status: String(row.status) as PlanStatus,
+    version: Number(row.version),
+    createdAt: String(row.created_at),
+    approvedAt: (row.approved_at as string | null) || null,
+    approvedBy: (row.approved_by as string | null) || null,
+    rejectedAt: (row.rejected_at as string | null) || null,
+    rejectedBy: (row.rejected_by as string | null) || null,
+    rejectedReason: (row.rejected_reason as string | null) || null,
+  };
+}
+
+function mapEvent(row: Record<string, unknown>): RunEventRecord {
+  return {
+    id: String(row.id),
+    runId: String(row.run_id),
+    taskId: (row.task_id as string | null) || null,
+    level: String(row.level) as RunEventRecord['level'],
+    type: String(row.type),
+    message: String(row.message),
+    payload: row.payload ? parseJson(row.payload, null) : null,
+    createdAt: String(row.created_at),
+  };
+}
+
+function mapArtifact(row: Record<string, unknown>): ArtifactRecord {
+  return {
+    id: String(row.id),
+    runId: String(row.run_id),
+    taskId: (row.task_id as string | null) || null,
+    type: String(row.type),
+    path: (row.path as string | null) || null,
+    content: (row.content as string | null) || null,
+    metadata: row.metadata ? parseJson(row.metadata, null) : null,
+    createdAt: String(row.created_at),
+  };
+}
+
 export class UnityStore {
   private readonly db: DatabaseSync;
 
@@ -127,6 +174,13 @@ export class UnityStore {
         run_id TEXT NOT NULL,
         summary TEXT NOT NULL,
         raw_plan TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'proposed',
+        version INTEGER NOT NULL DEFAULT 1,
+        approved_at TEXT,
+        approved_by TEXT,
+        rejected_at TEXT,
+        rejected_by TEXT,
+        rejected_reason TEXT,
         created_at TEXT NOT NULL
       );
 
@@ -209,6 +263,24 @@ export class UnityStore {
         finished_at TEXT
       );
     `);
+
+    this.ensureColumn('plans', 'status', `ALTER TABLE plans ADD COLUMN status TEXT NOT NULL DEFAULT 'proposed'`);
+    this.ensureColumn('plans', 'version', `ALTER TABLE plans ADD COLUMN version INTEGER NOT NULL DEFAULT 1`);
+    this.ensureColumn('plans', 'approved_at', `ALTER TABLE plans ADD COLUMN approved_at TEXT`);
+    this.ensureColumn('plans', 'approved_by', `ALTER TABLE plans ADD COLUMN approved_by TEXT`);
+    this.ensureColumn('plans', 'rejected_at', `ALTER TABLE plans ADD COLUMN rejected_at TEXT`);
+    this.ensureColumn('plans', 'rejected_by', `ALTER TABLE plans ADD COLUMN rejected_by TEXT`);
+    this.ensureColumn('plans', 'rejected_reason', `ALTER TABLE plans ADD COLUMN rejected_reason TEXT`);
+  }
+
+  private ensureColumn(tableName: string, columnName: string, sql: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>;
+
+    if (columns.some((column) => column.name === columnName)) {
+      return;
+    }
+
+    this.db.exec(sql);
   }
 
   close(): void {
@@ -277,10 +349,90 @@ export class UnityStore {
     return row ? mapRun(row) : null;
   }
 
-  createPlan(planId: string, runId: string, summary: string, rawPlan: unknown): void {
+  listRuns(limit = 50): RunRecord[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM runs ORDER BY created_at DESC LIMIT ?`)
+      .all(limit) as Record<string, unknown>[];
+
+    return rows.map(mapRun);
+  }
+
+  createPlan(
+    planId: string,
+    runId: string,
+    summary: string,
+    rawPlan: unknown,
+    options?: {
+      status?: PlanStatus;
+      version?: number;
+      approvedAt?: string | null;
+      approvedBy?: string | null;
+      rejectedAt?: string | null;
+      rejectedBy?: string | null;
+      rejectedReason?: string | null;
+    },
+  ): void {
     this.db
-      .prepare(`INSERT INTO plans (id, run_id, summary, raw_plan, created_at) VALUES (?, ?, ?, ?, ?)`)
-      .run(planId, runId, summary, JSON.stringify(rawPlan), nowIso());
+      .prepare(`
+        INSERT INTO plans (
+          id, run_id, summary, raw_plan, status, version, approved_at, approved_by,
+          rejected_at, rejected_by, rejected_reason, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        planId,
+        runId,
+        summary,
+        JSON.stringify(rawPlan),
+        options?.status || 'proposed',
+        options?.version || 1,
+        options?.approvedAt || null,
+        options?.approvedBy || null,
+        options?.rejectedAt || null,
+        options?.rejectedBy || null,
+        options?.rejectedReason || null,
+        nowIso(),
+      );
+  }
+
+  updatePlan(id: string, patch: Partial<PlanRecord>): void {
+    const entries = Object.entries({
+      summary: patch.summary,
+      raw_plan: patch.rawPlan ? JSON.stringify(patch.rawPlan) : undefined,
+      status: patch.status,
+      version: patch.version,
+      approved_at: patch.approvedAt,
+      approved_by: patch.approvedBy,
+      rejected_at: patch.rejectedAt,
+      rejected_by: patch.rejectedBy,
+      rejected_reason: patch.rejectedReason,
+    }).filter(([, value]) => value !== undefined);
+
+    if (entries.length === 0) return;
+
+    const sql = `UPDATE plans SET ${entries.map(([key]) => `${key} = ?`).join(', ')} WHERE id = ?`;
+    this.db.prepare(sql).run(...entries.map(([, value]) => toSqliteValue(value)), id);
+  }
+
+  getPlan(id: string): PlanRecord | null {
+    const row = this.db.prepare(`SELECT * FROM plans WHERE id = ?`).get(id) as Record<string, unknown> | undefined;
+    return row ? mapPlan(row) : null;
+  }
+
+  getLatestPlanByRun(runId: string): PlanRecord | null {
+    const row = this.db
+      .prepare(`SELECT * FROM plans WHERE run_id = ? ORDER BY version DESC, created_at DESC LIMIT 1`)
+      .get(runId) as Record<string, unknown> | undefined;
+
+    return row ? mapPlan(row) : null;
+  }
+
+  listPlansByRun(runId: string): PlanRecord[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM plans WHERE run_id = ? ORDER BY version DESC, created_at DESC`)
+      .all(runId) as Record<string, unknown>[];
+
+    return rows.map(mapPlan);
   }
 
   createTask(task: TaskRecord): void {
@@ -401,6 +553,22 @@ export class UnityStore {
         metadata ? JSON.stringify(metadata) : null,
         nowIso(),
       );
+  }
+
+  listEventsByRun(runId: string): RunEventRecord[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM events WHERE run_id = ? ORDER BY created_at ASC`)
+      .all(runId) as Record<string, unknown>[];
+
+    return rows.map(mapEvent);
+  }
+
+  listArtifactsByRun(runId: string): ArtifactRecord[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM artifacts WHERE run_id = ? ORDER BY created_at ASC`)
+      .all(runId) as Record<string, unknown>[];
+
+    return rows.map(mapArtifact);
   }
 
   upsertPolicy(projectName: string, policy: AutonomousRunPolicy): void {

@@ -9,6 +9,7 @@ function clamp(value: number, min: number, max: number): number {
 export function getDefaultAutonomousRunPolicy(): AutonomousRunPolicy {
   return {
     integrationBranchName: getRuntimeConfig().integrationBranchName,
+    autoApprovePlan: true,
     maxParallelTasks: 3,
     maxRetriesPerTask: 2,
     maxImprovementCycles: 2,
@@ -29,6 +30,7 @@ export function getDefaultAutonomousRunPolicy(): AutonomousRunPolicy {
 export function normalizePolicy(policy: AutonomousRunPolicy): AutonomousRunPolicy {
   return {
     ...policy,
+    autoApprovePlan: policy.autoApprovePlan ?? true,
     maxParallelTasks: clamp(policy.maxParallelTasks, 1, 6),
     maxRetriesPerTask: clamp(policy.maxRetriesPerTask, 0, 5),
     maxImprovementCycles: clamp(policy.maxImprovementCycles, 0, 4),

@@ -46,6 +46,10 @@ const commands = [
                 .setDescription('Ciclos máximos de self-improvement')
                 .setMinValue(0)
                 .setMaxValue(4)
+                .setRequired(false))
+        .addBooleanOption(option =>
+            option.setName('autoapproveplan')
+                .setDescription('Autoaprueba planes en modo nightly')
                 .setRequired(false)),
         
     new SlashCommandBuilder()

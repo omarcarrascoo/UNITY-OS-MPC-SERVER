@@ -10,6 +10,7 @@ export interface GatePolicy {
 
 export interface AutonomousRunPolicy {
   integrationBranchName: string;
+  autoApprovePlan: boolean;
   maxParallelTasks: number;
   maxRetriesPerTask: number;
   maxImprovementCycles: number;
