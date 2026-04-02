@@ -14,6 +14,7 @@ export type RunStatus =
   | 'running'
   | 'healing'
   | 'completed'
+  | 'completed_with_warnings'
   | 'failed'
   | 'cancelled';
 

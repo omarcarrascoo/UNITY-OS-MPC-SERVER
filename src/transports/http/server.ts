@@ -10,7 +10,76 @@ import { unityStore } from '../../runtime/services.js';
 import { createEntityId } from '../../shared/ids.js';
 
 type RunPayload = NonNullable<ReturnType<typeof buildRunPayload>>;
-type NormalizedServerTask = ReturnType<typeof normalizeServerTasks>[number];
+
+type UiTask = {
+  id: string;
+  runId: string;
+  parentTaskId: string | null;
+  title: string;
+  prompt: string | null;
+  role: string | null;
+  kind: string | null;
+  status: string;
+  writeScope: string[];
+  dependencies: string[];
+  attempts: number;
+  branchName: string | null;
+  worktreePath: string | null;
+  commitSha: string | null;
+  commitMessage: string | null;
+  outputSummary: string | null;
+  validationSummary: string | null;
+  orderIndex: number;
+  createdAt: string | null;
+  updatedAt: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  planOnly?: boolean;
+};
+
+type UiArtifact = {
+  taskId: string | null;
+  type: string;
+  path: string | null;
+  content: string | null;
+  createdAt: string | null;
+};
+
+type UiEvent = {
+  taskId: string | null;
+  type: string;
+  level: string;
+  message: string;
+  payload: unknown;
+  createdAt: string | null;
+};
+
+type UiRunViewModel = {
+  run: RunPayload['run'];
+  plan: RunPayload['plan'];
+  tasks: UiTask[];
+  artifacts: UiArtifact[];
+  events: UiEvent[];
+  selectedTaskId: string | null;
+  counts: {
+    total: number;
+    pending: number;
+    running: number;
+    succeeded: number;
+    failed: number;
+    blocked: number;
+    skipped: number;
+    done: number;
+    progress: number;
+  };
+  graph: {
+    svgInner: string;
+    viewBox: string;
+    width: number;
+    height: number;
+    phasesCount: number;
+  };
+};
 
 function escapeHtml(value: string): string {
   return value
@@ -29,51 +98,84 @@ function serializeForScript(value: unknown): string {
     .replace(/<\/script/gi, '<\\/script');
 }
 
+function safeText(value: unknown): string {
+  return escapeHtml(String(value ?? ''));
+}
+
+function truncate(value: unknown, maxLength: number): string {
+  const text = String(value ?? '');
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function formatDateTime(value: string | null | undefined): string {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('en-US');
+}
+
 function getStatusColor(status: string): string {
   switch (status) {
     case 'completed':
     case 'succeeded':
-      return '#86efac';
+      return '#4ade80'; // Emerald 400
+    case 'completed_with_warnings':
+      return '#f59e0b'; // Amber 500
     case 'awaiting_plan_approval':
     case 'pending':
-      return '#facc15';
+      return '#facc15'; // Yellow 400
     case 'failed':
     case 'blocked':
     case 'plan_rejected':
-      return '#fb7185';
+      return '#f87171'; // Red 400
+    case 'running':
+    case 'healing':
+    case 'planning':
+      return '#60a5fa'; // Blue 400
     case 'cancelled':
     case 'skipped':
-      return '#64748b';
+      return '#9ca3af'; // Gray 400
     default:
-      return '#cbd5e1';
+      return '#d1d5db'; // Gray 300
   }
 }
 
 function renderStatusBadgeHtml(status: string): string {
   const color = getStatusColor(status);
-  return `<span class="status-badge" style="background:${color}18;color:${color};">${escapeHtml(
+  return `<span class="status-badge" style="background:${color}15;color:${color};border:1px solid ${color}30;">${escapeHtml(
     status.replaceAll('_', ' '),
   )}</span>`;
 }
 
-function formatDateTime(value: string | null | undefined): string {
-  if (!value) return '—';
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-
-  return date.toLocaleString('en-US');
-}
-
-function normalizeServerTasks(payload: RunPayload) {
+function normalizeTasks(payload: RunPayload): UiTask[] {
   if (payload.tasks.length > 0) {
-    return payload.tasks;
+    return payload.tasks
+      .slice()
+      .sort((left, right) => left.orderIndex - right.orderIndex)
+      .map((task) => ({
+        ...task,
+        parentTaskId: task.parentTaskId ?? null,
+        prompt: task.prompt ?? null,
+        role: task.role ?? null,
+        kind: task.kind ?? null,
+        writeScope: task.writeScope || ['.'],
+        dependencies: task.dependencies || [],
+        branchName: task.branchName ?? null,
+        worktreePath: task.worktreePath ?? null,
+        commitSha: task.commitSha ?? null,
+        commitMessage: task.commitMessage ?? null,
+        outputSummary: task.outputSummary ?? null,
+        validationSummary: task.validationSummary ?? null,
+        createdAt: task.createdAt ?? null,
+        updatedAt: task.updatedAt ?? null,
+        startedAt: task.startedAt ?? null,
+        finishedAt: task.finishedAt ?? null,
+      }));
   }
 
   const planTasks = payload.plan?.rawPlan?.tasks || [];
   const titleToId = new Map<string, string>();
+
   planTasks.forEach((task, index) => {
     titleToId.set(task.title, `draft-${index}`);
   });
@@ -105,7 +207,7 @@ function normalizeServerTasks(payload: RunPayload) {
   }));
 }
 
-function buildServerLevels(tasks: ReturnType<typeof normalizeServerTasks>) {
+function buildLevels(tasks: UiTask[]) {
   const byId = new Map(tasks.map((task) => [task.id, task]));
   const memo = new Map<string, number>();
 
@@ -137,7 +239,7 @@ function buildServerLevels(tasks: ReturnType<typeof normalizeServerTasks>) {
     computeLevel(task.id, new Set());
   }
 
-  const levels: Array<NormalizedServerTask[]> = [];
+  const levels: UiTask[][] = [];
   for (const task of tasks) {
     const level = memo.get(task.id) || 0;
     if (!levels[level]) {
@@ -153,17 +255,11 @@ function buildServerLevels(tasks: ReturnType<typeof normalizeServerTasks>) {
   return levels.filter(Boolean);
 }
 
-function buildServerGraph(
+function buildGraph(
   runId: string,
-  tasks: ReturnType<typeof normalizeServerTasks>,
+  tasks: UiTask[],
   selectedTaskId: string | null,
-): {
-  svgInner: string;
-  viewBox: string;
-  width: number;
-  height: number;
-  phasesCount: number;
-} {
+): UiRunViewModel['graph'] {
   if (tasks.length === 0) {
     return {
       width: 900,
@@ -174,13 +270,13 @@ function buildServerGraph(
     };
   }
 
-  const levels = buildServerLevels(tasks);
-  const nodeWidth = 286;
-  const nodeHeight = 118;
-  const columnGap = 170;
-  const rowGap = 168;
-  const marginX = 88;
-  const marginY = 100;
+  const levels = buildLevels(tasks);
+  const nodeWidth = 280;
+  const nodeHeight = 110;
+  const columnGap = 120;
+  const rowGap = 140;
+  const marginX = 60;
+  const marginY = 80;
   const positions = new Map<string, { x: number; y: number }>();
   let maxRows = 1;
 
@@ -196,12 +292,12 @@ function buildServerGraph(
 
   const width =
     marginX * 2 + Math.max(1, levels.length) * nodeWidth + Math.max(0, levels.length - 1) * columnGap;
-  const height = marginY + maxRows * rowGap + 80;
+  const height = marginY + maxRows * rowGap + 90;
 
   const laneLabels = levels
     .map((column, index) => {
       const x = marginX + index * (nodeWidth + columnGap);
-      return `<text x="${x}" y="46" class="lane-label">Phase ${index + 1}</text><text x="${x}" y="68" class="lane-sub">${column.length} node(s)</text>`;
+      return `<text x="${x}" y="36" class="lane-label">Phase ${index + 1}</text><text x="${x}" y="56" class="lane-sub">${column.length} node(s)</text>`;
     })
     .join('');
 
@@ -217,8 +313,8 @@ function buildServerGraph(
         const startY = source.y + nodeHeight / 2;
         const endX = target.x;
         const endY = target.y + nodeHeight / 2;
-        const curve = Math.max(56, (endX - startX) / 2);
-        return `<path class="edge" stroke="rgba(203,213,225,0.38)" d="M ${startX} ${startY} C ${startX + curve} ${startY}, ${endX - curve} ${endY}, ${endX} ${endY}" />`;
+        const curve = Math.max(40, (endX - startX) / 2);
+        return `<path class="edge" stroke="#3f3f46" d="M ${startX} ${startY} C ${startX + curve} ${startY}, ${endX - curve} ${endY}, ${endX} ${endY}" />`;
       });
     })
     .join('');
@@ -228,23 +324,23 @@ function buildServerGraph(
       const position = positions.get(task.id) as { x: number; y: number };
       const color = getStatusColor(task.status);
       const active = selectedTaskId === task.id;
-      const stroke = active ? '#ffffff' : 'rgba(255,255,255,0.1)';
-      const glow = active ? '0 0 18px rgba(255,255,255,0.22)' : 'none';
-      const scopeLabel = escapeHtml((task.writeScope || ['.']).join(', ').slice(0, 34));
-      const summary = escapeHtml(String(task.outputSummary || task.validationSummary || task.prompt || '').slice(0, 74));
+      const stroke = active ? color : '#3f3f46';
+      const glow = active ? `drop-shadow(0 0 10px ${color}40)` : 'none';
+      const scopeLabel = escapeHtml(truncate((task.writeScope || ['.']).join(', '), 30));
+      const summary = escapeHtml(truncate(task.outputSummary || task.validationSummary || task.prompt || '', 60));
       const taskHref = `/runs/${encodeURIComponent(runId)}?task=${encodeURIComponent(task.id)}`;
 
       return `<a href="${taskHref}">
-        <g class="node-group" data-task-id="${escapeHtml(task.id)}" transform="translate(${position.x} ${position.y})">
-          <rect class="node-card" x="0" y="0" rx="26" ry="26" width="${nodeWidth}" height="${nodeHeight}" fill="rgba(7,16,25,0.85)" stroke="${stroke}" style="filter:${glow};" />
-          <rect x="18" y="16" rx="14" ry="14" width="56" height="32" fill="${color}18" stroke="${color}" />
-          <text x="33" y="37" class="node-subtitle" fill="${color}">${escapeHtml(task.status.toUpperCase())}</text>
-          <circle cx="247" cy="31" r="12" class="status-ring" />
-          <circle cx="247" cy="31" r="6" class="status-dot" fill="${color}" />
-          <text x="18" y="66" class="node-title">${escapeHtml(task.title.slice(0, 29))}</text>
-          <text x="18" y="88" class="node-subtitle">scope · ${scopeLabel}</text>
-          <text x="18" y="106" class="node-foot">${summary}</text>
-          <text x="230" y="105" class="node-foot" text-anchor="end">attempts ${task.attempts || 0}</text>
+        <g class="node-group${active ? ' active' : ''}" data-task-id="${escapeHtml(task.id)}" transform="translate(${position.x} ${position.y})" style="filter:${glow};">
+          <rect class="node-card" x="0" y="0" rx="12" ry="12" width="${nodeWidth}" height="${nodeHeight}" fill="#18181b" stroke="${stroke}" />
+          <rect x="16" y="16" rx="6" ry="6" width="68" height="24" fill="${color}15" stroke="${color}30" />
+          <text x="26" y="32" class="node-subtitle" fill="${color}">${escapeHtml(task.status.toUpperCase())}</text>
+          
+          <circle cx="250" cy="28" r="4" fill="${color}" />
+          
+          <text x="16" y="64" class="node-title">${escapeHtml(truncate(task.title, 28))}</text>
+          <text x="16" y="84" class="node-subtitle">scope · ${scopeLabel}</text>
+          <text x="16" y="100" class="node-foot">${summary}</text>
         </g>
       </a>`;
     })
@@ -259,207 +355,56 @@ function buildServerGraph(
   };
 }
 
-function buildInitialRunUi(payload: RunPayload, requestedTaskId?: string | null) {
-  const tasks = normalizeServerTasks(payload);
+function buildRunCounts(tasks: UiTask[]) {
+  const counts = {
+    total: tasks.length,
+    pending: tasks.filter((task) => task.status === 'pending').length,
+    running: tasks.filter((task) => task.status === 'running').length,
+    succeeded: tasks.filter((task) => task.status === 'succeeded').length,
+    failed: tasks.filter((task) => task.status === 'failed').length,
+    blocked: tasks.filter((task) => task.status === 'blocked').length,
+    skipped: tasks.filter((task) => task.status === 'skipped').length,
+    done: 0,
+    progress: 0,
+  };
+
+  counts.done = counts.succeeded + counts.failed + counts.blocked + counts.skipped;
+  counts.progress = counts.total ? Math.round((counts.done / counts.total) * 100) : 0;
+
+  return counts;
+}
+
+function buildRunViewModel(payload: RunPayload, requestedTaskId?: string | null): UiRunViewModel {
+  const tasks = normalizeTasks(payload);
   const selectedTask =
     tasks.find((task) => task.id === requestedTaskId) ||
     tasks[0] ||
     null;
-  const taskArtifacts = selectedTask
-    ? payload.artifacts.filter((artifact) => artifact.taskId === selectedTask.id)
-    : [];
-  const runId = encodeURIComponent(payload.run.id);
 
-  const actionsHtml =
-    payload.run.status === 'awaiting_plan_approval' && payload.plan?.status === 'proposed'
-      ? `<form method="post" action="/runs/${runId}/approve-plan">
-          <button class="primary" type="submit">Approve Plan</button>
-        </form>
-        <form method="post" action="/runs/${runId}/reject-plan">
-          <input type="hidden" name="reason" value="Plan rejected from the local console." />
-          <button class="danger" type="submit">Reject Plan</button>
-        </form>`
-      : payload.run.status === 'running' || payload.run.status === 'healing'
-        ? `<form method="post" action="/runs/${runId}/cancel">
-            <button class="secondary" type="submit">Cancel Active Run</button>
-          </form>`
-        : '';
-
-  const metaHtml = [
-    ['Status', renderStatusBadgeHtml(payload.run.status)],
-    ['Mode', escapeHtml(payload.run.mode)],
-    ['Branch', escapeHtml(payload.run.branchName)],
-    ['Plan', payload.plan ? renderStatusBadgeHtml(payload.plan.status) : 'Missing'],
-    ['Parallel', String(payload.run.maxParallelTasks)],
-    ['Retries', String(payload.run.maxRetriesPerTask)],
-    ['Tasks', String(tasks.length)],
-    ['Events', String(payload.events.length)],
-  ]
-    .map(
-      ([label, value]) =>
-        `<div class="meta-card"><div class="meta-label">${label}</div><div class="meta-value">${value}</div></div>`,
-    )
-    .join('');
-
-  const planMetaHtml = payload.plan
-    ? [
-        ['Run status', renderStatusBadgeHtml(payload.run.status)],
-        ['Plan status', renderStatusBadgeHtml(payload.plan.status)],
-        ['Created', formatDateTime(payload.plan.createdAt)],
-        [
-          'Approved',
-          payload.plan.approvedAt
-            ? `${formatDateTime(payload.plan.approvedAt)} · ${escapeHtml(payload.plan.approvedBy || 'unknown')}`
-            : 'Pending',
-        ],
-        [
-          'Rejected',
-          payload.plan.rejectedAt
-            ? `${formatDateTime(payload.plan.rejectedAt)} · ${escapeHtml(payload.plan.rejectedBy || 'unknown')}`
-            : '—',
-        ],
-      ]
-        .map(
-          ([label, value]) =>
-            `<div class="meta-card" style="margin-bottom:12px;"><div class="meta-label">${label}</div><div class="meta-value">${value}</div></div>`,
-        )
-        .join('') +
-      `<div class="task-card"><div class="task-title">Plan Summary</div><pre>${escapeHtml(payload.plan.summary)}</pre></div>` +
-      (payload.plan.rejectedReason
-        ? `<div class="task-card"><div class="task-title">Rejected Because</div><pre>${escapeHtml(
-            payload.plan.rejectedReason,
-          )}</pre></div>`
-        : '')
-    : '<div class="muted">Plan not found.</div>';
-
-  const eventsHtml = payload.events.length
-    ? payload.events
-        .slice()
-        .reverse()
-        .map((event) => {
-          const levelColor =
-            event.level === 'error'
-              ? getStatusColor('failed')
-              : event.level === 'warning'
-                ? getStatusColor('pending')
-                : getStatusColor('running');
-          return `<div class="timeline-item">
-            <div class="timeline-dot" style="background:${levelColor};"></div>
-            <article class="event-card">
-              <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;">
-                <strong>${escapeHtml(event.type)}</strong>
-                <span class="muted">${escapeHtml(formatDateTime(event.createdAt))}</span>
-              </div>
-              <div>${escapeHtml(event.message)}</div>
-              ${event.payload ? `<pre>${escapeHtml(JSON.stringify(event.payload, null, 2))}</pre>` : ''}
-            </article>
-          </div>`;
-        })
-        .join('')
-    : '<div class="event-card">No events yet.</div>';
-
-  const inspectorHtml = selectedTask
-    ? `<div class="task-card">
-        <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;">
-          <div class="task-title">${escapeHtml(selectedTask.title)}</div>
-          ${renderStatusBadgeHtml(selectedTask.status)}
-        </div>
-        <div class="chip-row">
-          <span class="chip">${escapeHtml(selectedTask.kind || 'implement')}</span>
-          <span class="chip">attempts ${escapeHtml(String(selectedTask.attempts || 0))}</span>
-          ${'planOnly' in selectedTask && selectedTask.planOnly ? '<span class="chip">plan preview</span>' : ''}
-        </div>
-        <div class="chip-row">${(selectedTask.writeScope || ['.'])
-          .map((scope) => `<span class="chip">${escapeHtml(scope)}</span>`)
-          .join('')}</div>
-        <div class="muted">${
-          selectedTask.dependencies.length ? `Depends on ${selectedTask.dependencies.length} task(s)` : 'No dependencies'
-        }</div>
-        <pre>${escapeHtml(
-          selectedTask.outputSummary || selectedTask.validationSummary || selectedTask.prompt || '',
-        )}</pre>
-      </div>`
-    : '<div class="inspector-empty">Waiting for task selection…</div>';
-
-  const artifactsHtml = taskArtifacts.length
-    ? taskArtifacts
-        .slice()
-        .reverse()
-        .map((artifact) => {
-          const preview = artifact.content ? artifact.content.slice(0, 1000) : '(binary or path-only artifact)';
-          return `<article class="artifact-card">
-            <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;">
-              <strong>${escapeHtml(artifact.type)}</strong>
-              <span class="muted">${escapeHtml(formatDateTime(artifact.createdAt))}</span>
-            </div>
-            ${artifact.path ? `<div class="muted">${escapeHtml(artifact.path)}</div>` : ''}
-            <pre>${escapeHtml(preview)}</pre>
-          </article>`;
-        })
-        .join('')
-    : '<div class="artifact-card">No artifacts stored for this task yet.</div>';
-
-  const graph = buildServerGraph(payload.run.id, tasks, selectedTask?.id || null);
-
-  const taskListHtml = tasks.length
-    ? tasks
-        .map((task) => {
-          const active = selectedTask?.id === task.id;
-          const href = `/runs/${encodeURIComponent(payload.run.id)}?task=${encodeURIComponent(task.id)}`;
-          const dependencyCount = task.dependencies.length;
-          return `<a class="task-list-item${active ? ' active' : ''}" href="${href}">
-            <div class="task-list-top">
-              <div class="task-list-title">${escapeHtml(task.title)}</div>
-              ${renderStatusBadgeHtml(task.status)}
-            </div>
-            <div class="chip-row">
-              <span class="chip">${escapeHtml(task.kind || 'implement')}</span>
-              <span class="chip">attempts ${escapeHtml(String(task.attempts || 0))}</span>
-              ${'planOnly' in task && task.planOnly ? '<span class="chip">plan preview</span>' : ''}
-            </div>
-            <div class="task-list-meta">
-              <span>scope · ${escapeHtml((task.writeScope || ['.']).join(', '))}</span>
-              <span>${dependencyCount ? `${dependencyCount} dependenc${dependencyCount === 1 ? 'y' : 'ies'}` : 'no dependencies'}</span>
-            </div>
-          </a>`;
-        })
-        .join('')
-    : '<div class="task-list-empty">No tasks available yet.</div>';
-
-  const graphSummaryHtml = [
-    `<span class="chip">nodes ${tasks.length}</span>`,
-    `<span class="chip">phases ${graph.phasesCount}</span>`,
-    `<span class="chip">mode ${escapeHtml(payload.run.mode)}</span>`,
-    `<span class="chip">events ${payload.events.length}</span>`,
-  ].join('');
-
-  const graphModeMessage =
-    payload.run.status === 'awaiting_plan_approval'
-      ? 'Awaiting approval before execution'
-      : `Run is ${payload.run.status.replaceAll('_', ' ')}`;
-
-  const graphSelectionMessage = selectedTask
-    ? `Inspecting ${selectedTask.title}`
-    : tasks.length
-      ? 'Select a node to inspect it.'
-      : 'Waiting for plan data';
+  const counts = buildRunCounts(tasks);
 
   return {
+    run: payload.run,
+    plan: payload.plan,
+    tasks,
+    artifacts: payload.artifacts.map((artifact) => ({
+      taskId: artifact.taskId ?? null,
+      type: artifact.type,
+      path: artifact.path ?? null,
+      content: artifact.content ?? null,
+      createdAt: artifact.createdAt ?? null,
+    })),
+    events: payload.events.map((event) => ({
+      taskId: event.taskId ?? null,
+      type: event.type,
+      level: event.level,
+      message: event.message,
+      payload: event.payload,
+      createdAt: event.createdAt ?? null,
+    })),
     selectedTaskId: selectedTask?.id || null,
-    actionsHtml,
-    metaHtml,
-    planMetaHtml,
-    eventsHtml,
-    inspectorHtml,
-    artifactsHtml,
-    graphSummaryHtml,
-    graphModeMessage,
-    graphSelectionMessage,
-    graphSvgInner: graph.svgInner,
-    graphViewBox: graph.viewBox,
-    graphWidth: graph.width,
-    graphHeight: graph.height,
-    taskListHtml,
+    counts,
+    graph: buildGraph(payload.run.id, tasks, selectedTask?.id || null),
   };
 }
 
@@ -489,43 +434,30 @@ function redirect(res: ServerResponse, location: string): void {
 
 async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
-
   for await (const chunk of req) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
 
-  if (chunks.length === 0) {
-    return {};
-  }
-
+  if (chunks.length === 0) return {};
   const raw = Buffer.concat(chunks).toString('utf8').trim();
-  if (!raw) {
-    return {};
-  }
-
+  if (!raw) return {};
   return JSON.parse(raw) as Record<string, unknown>;
 }
 
 async function readFormBody(req: IncomingMessage): Promise<Record<string, string>> {
   const chunks: Buffer[] = [];
-
   for await (const chunk of req) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
 
-  if (chunks.length === 0) {
-    return {};
-  }
-
+  if (chunks.length === 0) return {};
   const raw = Buffer.concat(chunks).toString('utf8');
   return Object.fromEntries(new URLSearchParams(raw).entries());
 }
 
 function extractRunId(pathname: string, suffix = ''): string | null {
   const base = '/api/runs/';
-  if (!pathname.startsWith(base)) {
-    return null;
-  }
+  if (!pathname.startsWith(base)) return null;
 
   const trimmed = pathname.slice(base.length);
   if (suffix && trimmed.endsWith(suffix)) {
@@ -541,9 +473,7 @@ function extractRunId(pathname: string, suffix = ''): string | null {
 
 function extractConsoleRunId(pathname: string, suffix = ''): string | null {
   const base = '/runs/';
-  if (!pathname.startsWith(base)) {
-    return null;
-  }
+  if (!pathname.startsWith(base)) return null;
 
   const trimmed = pathname.slice(base.length);
   if (suffix && trimmed.endsWith(suffix)) {
@@ -577,415 +507,431 @@ function buildRunsListPayload() {
   return unityStore.listRuns(100).map((run) => {
     const latestPlan = unityStore.getLatestPlanByRun(run.id);
     const tasks = unityStore.listTasksByRun(run.id);
+    const counts = buildRunCounts(
+      tasks.map((task) => ({
+        ...task,
+        parentTaskId: task.parentTaskId ?? null,
+        prompt: task.prompt ?? null,
+        role: task.role ?? null,
+        kind: task.kind ?? null,
+        writeScope: task.writeScope || ['.'],
+        dependencies: task.dependencies || [],
+        branchName: task.branchName ?? null,
+        worktreePath: task.worktreePath ?? null,
+        commitSha: task.commitSha ?? null,
+        commitMessage: task.commitMessage ?? null,
+        outputSummary: task.outputSummary ?? null,
+        validationSummary: task.validationSummary ?? null,
+        createdAt: task.createdAt ?? null,
+        updatedAt: task.updatedAt ?? null,
+        startedAt: task.startedAt ?? null,
+        finishedAt: task.finishedAt ?? null,
+      })),
+    );
 
     return {
       run,
       latestPlan,
-      taskCounts: {
-        pending: tasks.filter((task) => task.status === 'pending').length,
-        running: tasks.filter((task) => task.status === 'running').length,
-        succeeded: tasks.filter((task) => task.status === 'succeeded').length,
-        failed: tasks.filter((task) => task.status === 'failed').length,
-        blocked: tasks.filter((task) => task.status === 'blocked').length,
-        skipped: tasks.filter((task) => task.status === 'skipped').length,
-      },
+      taskCounts: counts,
     };
   });
 }
 
-function renderHomePage(): string {
+function buildActionsHtml(run: UiRunViewModel['run'], plan: UiRunViewModel['plan']) {
+  const runId = encodeURIComponent(run.id);
+
+  if (run.status === 'awaiting_plan_approval' && plan?.status === 'proposed') {
+    return `<div class="actions">
+        <button class="btn-primary" id="approve-plan">Approve Plan</button>
+        <button class="btn-danger" id="reject-plan">Reject Plan</button>
+      </div>`;
+  }
+
+  if (run.status === 'running' || run.status === 'healing') {
+    return `<div class="actions">
+      <button class="btn-secondary" id="cancel-run">Cancel Active Run</button>
+    </div>`;
+  }
+
+  return '';
+}
+
+function buildMetaGridHtml(vm: UiRunViewModel) {
+  const cards = [
+    ['Status', renderStatusBadgeHtml(vm.run.status)],
+    ['Mode', safeText(vm.run.mode)],
+    ['Branch', safeText(vm.run.branchName)],
+    ['Plan', vm.plan ? renderStatusBadgeHtml(vm.plan.status) : '<span class="muted">Missing</span>'],
+    ['Progress', `${vm.counts.progress}%`],
+    ['Tasks', String(vm.counts.total)],
+    ['Running', String(vm.counts.running)],
+    ['Failed', String(vm.counts.failed)],
+  ];
+
+  return cards
+    .map(
+      ([label, value]) =>
+        `<div class="meta-card"><div class="meta-label">${label}</div><div class="meta-value">${value}</div></div>`,
+    )
+    .join('');
+}
+
+function buildPlanMetaHtml(vm: UiRunViewModel) {
+  if (!vm.plan) {
+    return '<div class="muted" style="padding: 16px;">Plan not found.</div>';
+  }
+
+  const lifecycle = [
+    ['Run status', renderStatusBadgeHtml(vm.run.status)],
+    ['Plan status', renderStatusBadgeHtml(vm.plan.status)],
+    ['Created', formatDateTime(vm.plan.createdAt)],
+    [
+      'Approved',
+      vm.plan.approvedAt
+        ? `${formatDateTime(vm.plan.approvedAt)} · ${safeText(vm.plan.approvedBy || 'unknown')}`
+        : 'Pending',
+    ],
+    [
+      'Rejected',
+      vm.plan.rejectedAt
+        ? `${formatDateTime(vm.plan.rejectedAt)} · ${safeText(vm.plan.rejectedBy || 'unknown')}`
+        : '—',
+    ],
+    ['Tasks', String(vm.counts.total)],
+  ];
+
+  return (
+    `<div class="kv-grid">` +
+    lifecycle
+      .map(
+        ([label, value]) =>
+          `<div class="meta-card"><div class="meta-label">${label}</div><div class="meta-value" style="font-size:13px; font-weight:normal;">${value}</div></div>`,
+      )
+      .join('') +
+    `</div>
+    <div class="task-card" style="margin-top: 16px;">
+      <div class="task-title">Plan Summary</div>
+      <pre>${safeText(vm.plan.summary)}</pre>
+    </div>` +
+    (vm.plan.rejectedReason
+      ? `<div class="task-card" style="margin-top: 16px; border-color: #f8717140;"><div class="task-title" style="color: #f87171;">Rejected Because</div><pre>${safeText(
+          vm.plan.rejectedReason,
+        )}</pre></div>`
+      : '')
+  );
+}
+
+function buildEventsHtml(events: UiEvent[]) {
+  if (!events.length) {
+    return '<div class="muted" style="padding: 16px;">No events yet.</div>';
+  }
+
+  return events
+    .slice()
+    .reverse()
+    .map((event) => {
+      const levelColor =
+        event.level === 'error'
+          ? getStatusColor('failed')
+          : event.level === 'warning'
+            ? getStatusColor('pending')
+            : getStatusColor('running');
+
+      return `<div class="timeline-item">
+        <div class="timeline-dot" style="background:${levelColor}; box-shadow: 0 0 0 4px #09090b;"></div>
+        <article class="event-card">
+          <div class="event-top">
+            <strong>${safeText(event.type)}</strong>
+            <span class="muted">${safeText(formatDateTime(event.createdAt))}</span>
+          </div>
+          <div style="font-size: 13px; color: var(--text-muted); margin-top: 6px;">${safeText(event.message)}</div>
+          ${event.payload ? `<pre style="margin-top: 10px;">${safeText(JSON.stringify(event.payload, null, 2))}</pre>` : ''}
+        </article>
+      </div>`;
+    })
+    .join('');
+}
+
+function buildTaskListHtml(tasks: UiTask[], selectedTaskId: string | null) {
+  if (!tasks.length) {
+    return '<div class="muted" style="padding: 16px; text-align: center;">No tasks available yet.</div>';
+  }
+
+  return tasks
+    .map((task) => {
+      const active = selectedTaskId === task.id;
+      const dependencyCount = task.dependencies.length;
+
+      return `<a class="task-list-item${active ? ' active' : ''}" href="/runs/${encodeURIComponent(
+        task.runId,
+      )}?task=${encodeURIComponent(task.id)}" data-task-id="${safeText(task.id)}">
+        <div class="task-list-top">
+          <div class="task-list-title">${safeText(task.title)}</div>
+          ${renderStatusBadgeHtml(task.status)}
+        </div>
+        <div class="chip-row" style="margin-top: 8px;">
+          <span class="chip">${safeText(task.kind || 'implement')}</span>
+          <span class="chip">attempts ${safeText(task.attempts)}</span>
+          ${task.planOnly ? '<span class="chip">plan preview</span>' : ''}
+        </div>
+        <div class="task-list-meta" style="margin-top: 12px;">
+          <span>scope: ${safeText((task.writeScope || ['.']).join(', '))}</span>
+          <span>${dependencyCount ? `${dependencyCount} dependenc${dependencyCount === 1 ? 'y' : 'ies'}` : 'no deps'}</span>
+        </div>
+      </a>`;
+    })
+    .join('');
+}
+
+function buildInspectorHtml(vm: UiRunViewModel) {
+  const task = vm.tasks.find((candidate) => candidate.id === vm.selectedTaskId);
+
+  if (!task) {
+    return '<div class="muted" style="padding: 16px; text-align: center;">Select a task to inspect.</div>';
+  }
+
+  const dependencyTitles = task.dependencies.map((dependencyId) => {
+    const dependency = vm.tasks.find((candidate) => candidate.id === dependencyId);
+    return dependency ? dependency.title : dependencyId;
+  });
+
+  const relatedEvents = vm.events
+    .filter((event) => event.taskId === task.id)
+    .slice(-4)
+    .reverse();
+
+  return `<div style="display: flex; flex-direction: column; gap: 16px;">
+    <div class="split">
+      <div class="task-title" style="font-size: 16px;">${safeText(task.title)}</div>
+      ${renderStatusBadgeHtml(task.status)}
+    </div>
+    <div class="chip-row">
+      <span class="chip">${safeText(task.kind || 'implement')}</span>
+      <span class="chip">attempts ${safeText(task.attempts)}</span>
+      ${task.planOnly ? '<span class="chip">plan preview</span>' : ''}
+    </div>
+    <div class="kv-grid">
+      <div class="meta-card"><div class="meta-label">Scope</div><div class="meta-value" style="font-size:13px; font-weight:normal;">${safeText((task.writeScope || ['.']).join(', '))}</div></div>
+      <div class="meta-card"><div class="meta-label">Dependencies</div><div class="meta-value" style="font-size:13px; font-weight:normal;">${safeText(dependencyTitles.length ? dependencyTitles.join(', ') : 'None')}</div></div>
+      <div class="meta-card"><div class="meta-label">Branch</div><div class="meta-value" style="font-size:13px; font-weight:normal;">${safeText(task.branchName || vm.run.branchName || '—')}</div></div>
+      <div class="meta-card"><div class="meta-label">Commit</div><div class="meta-value" style="font-size:13px; font-weight:normal;">${safeText(task.commitSha || '—')}</div></div>
+    </div>
+    <div class="task-card">
+      <div class="meta-label">Summary</div>
+      <pre>${safeText(task.outputSummary || task.validationSummary || task.prompt || 'No summary available.')}</pre>
+    </div>
+    ${
+      relatedEvents.length
+        ? `<div class="task-card">
+            <div class="meta-label">Recent task events</div>
+            <pre>${safeText(
+              relatedEvents
+                .map((event) => `[${formatDateTime(event.createdAt)}] ${event.type} → ${event.message}`)
+                .join('\n\n'),
+            )}</pre>
+          </div>`
+        : ''
+    }
+  </div>`;
+}
+
+function buildArtifactsHtml(vm: UiRunViewModel) {
+  const task = vm.tasks.find((candidate) => candidate.id === vm.selectedTaskId);
+  if (!task) {
+    return '<div class="muted" style="padding: 16px;">Select a task to view artifacts.</div>';
+  }
+
+  const taskArtifacts = vm.artifacts.filter((artifact) => artifact.taskId === task.id);
+  if (!taskArtifacts.length) {
+    return '<div class="muted" style="padding: 16px;">No artifacts stored for this task.</div>';
+  }
+
+  return taskArtifacts
+    .slice()
+    .reverse()
+    .map((artifact) => {
+      const preview = artifact.content ? artifact.content.slice(0, 1000) : '(binary or path-only artifact)';
+      return `<article class="task-card" style="margin-bottom: 12px;">
+        <div class="event-top" style="margin-bottom: 8px;">
+          <strong style="font-size: 13px;">${safeText(artifact.type)}</strong>
+          <span class="muted" style="font-size: 12px;">${safeText(formatDateTime(artifact.createdAt))}</span>
+        </div>
+        ${artifact.path ? `<div class="muted" style="font-size: 12px; margin-bottom: 12px; font-family: monospace;">${safeText(artifact.path)}</div>` : ''}
+        <pre>${safeText(preview)}</pre>
+      </article>`;
+    })
+    .join('');
+}
+
+const GLOBAL_CSS = `
+  :root {
+    --bg-app: #09090b;
+    --bg-sidenav: #121214;
+    --bg-surface: #18181b;
+    --border: #27272a;
+    --text-main: #fafafa;
+    --text-muted: #a1a1aa;
+    --accent: #e4e4e7;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; overflow: hidden;
+    color: var(--text-main);
+    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background: var(--bg-app);
+    display: flex;
+  }
+  a { text-decoration: none; color: inherit; }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.5; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; color: var(--text-muted); }
+  
+  /* Sidenav */
+  .sidenav {
+    width: 280px; min-width: 280px;
+    background: var(--bg-sidenav);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    padding: 16px; gap: 16px;
+    z-index: 10;
+  }
+  .sidenav-header { padding: 8px 4px; display: flex; align-items: center; justify-content: space-between; }
+  .sidenav-header h2 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: 0.02em; display: flex; align-items: center; gap: 8px;}
+  .sidenav-header h2::before { content: ''; display: inline-block; width: 8px; height: 8px; background: #fafafa; border-radius: 2px; }
+  .search-box {
+    background: var(--bg-app); border: 1px solid var(--border);
+    color: var(--text-main); padding: 10px 14px;
+    border-radius: 8px; font-size: 13px; width: 100%;
+    outline: none; transition: border 0.2s;
+  }
+  .search-box:focus { border-color: #52525b; }
+  .runs-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; padding-right: 4px; }
+  .run-nav-item {
+    padding: 10px 12px; border-radius: 8px; cursor: pointer;
+    display: flex; flex-direction: column; gap: 6px;
+    color: var(--text-muted); transition: all 0.15s ease; border: 1px solid transparent;
+  }
+  .run-nav-item:hover { background: var(--bg-surface); color: var(--text-main); }
+  .run-nav-item.active { background: var(--bg-surface); color: var(--text-main); border-color: var(--border); }
+  .run-nav-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .run-nav-meta { font-size: 11px; display: flex; justify-content: space-between; align-items: center; }
+  .run-nav-status { display: flex; align-items: center; gap: 4px; }
+  .status-dot { width: 6px; height: 6px; border-radius: 50%; }
+
+  /* Main View Common */
+  .main-content { flex: 1; overflow-y: auto; position: relative; display: flex; flex-direction: column; }
+  .muted { color: var(--text-muted); }
+  
+  /* Scrollbars */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 10px; }
+  ::-webkit-scrollbar-thumb:hover { background: #52525b; }
+`;
+
+function buildHomePageShell(): string {
   return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Unity Command Deck</title>
+    <title>Unity · Home</title>
     <style>
-      :root {
-        --bg-1: #0c1117;
-        --bg-2: #141b24;
-        --bg-3: #1a232e;
-        --panel: rgba(17, 24, 33, 0.82);
-        --panel-border: rgba(148, 163, 184, 0.14);
-        --text: #edf2f7;
-        --muted: #94a3b8;
-        --accent: #cbd5e1;
-        --accent-soft: rgba(203, 213, 225, 0.08);
-        --success: #86efac;
-        --warning: #facc15;
-        --danger: #fb7185;
-        --shadow: 0 24px 70px rgba(0, 0, 0, 0.36);
+      ${GLOBAL_CSS}
+      .home-container {
+        max-width: 900px; margin: 0 auto; width: 100%;
+        padding: 80px 48px; display: flex; flex-direction: column; gap: 48px;
       }
-
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        min-height: 100vh;
-        font-family: "Avenir Next", "SF Pro Display", "Segoe UI", sans-serif;
-        color: var(--text);
-        background:
-          radial-gradient(circle at top left, rgba(255,255,255,0.05), transparent 24%),
-          radial-gradient(circle at bottom right, rgba(148,163,184,0.06), transparent 22%),
-          linear-gradient(160deg, var(--bg-1) 0%, var(--bg-2) 54%, var(--bg-3) 100%);
+      .greeting h1 { font-size: 32px; font-weight: 400; letter-spacing: -0.02em; margin: 0 0 12px 0; }
+      .greeting p { color: var(--text-muted); font-size: 15px; margin: 0; line-height: 1.6; max-width: 600px; }
+      .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; }
+      .stat-card {
+        background: var(--bg-surface); border: 1px solid var(--border);
+        border-radius: var(--radius); padding: 24px;
+        display: flex; flex-direction: column; gap: 8px;
       }
-
-      body::before {
-        content: '';
-        position: fixed;
-        inset: 0;
-        background-image:
-          linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
-          linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
-        background-size: 42px 42px;
-        mask-image: radial-gradient(circle at center, black 30%, transparent 82%);
-        pointer-events: none;
-        opacity: 0.4;
-      }
-
-      .shell {
-        position: relative;
-        width: min(1240px, calc(100vw - 36px));
-        margin: 28px auto 48px;
-      }
-
-      .hero, .card {
-        background: var(--panel);
-        border: 1px solid var(--panel-border);
-        border-radius: 28px;
-        backdrop-filter: blur(26px);
-        box-shadow: var(--shadow);
-      }
-
-      .hero {
-        padding: 28px;
-        margin-bottom: 22px;
-        overflow: hidden;
-        position: relative;
-      }
-
-      .hero::after {
-        content: '';
-        position: absolute;
-        width: 420px;
-        height: 420px;
-        right: -140px;
-        top: -180px;
-        border-radius: 50%;
-        background: radial-gradient(circle, rgba(255,255,255,0.08) 0%, transparent 70%);
-        pointer-events: none;
-      }
-
-      h1 {
-        margin: 0 0 10px;
-        font-size: clamp(34px, 5vw, 58px);
-        letter-spacing: -0.04em;
-        line-height: 0.95;
-      }
-
-      .subtle {
-        margin: 0;
-        color: var(--muted);
-        max-width: 760px;
-        line-height: 1.6;
-      }
-
-      .eyebrow {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        padding: 8px 12px;
-        border-radius: 999px;
-        background: rgba(255,255,255,0.06);
-        border: 1px solid rgba(255,255,255,0.08);
-        color: var(--accent);
-        font-size: 12px;
-        font-weight: 800;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-        margin-bottom: 16px;
-      }
-
-      .hero-grid {
-        display: grid;
-        grid-template-columns: minmax(0, 1.2fr) 320px;
-        gap: 20px;
-        align-items: end;
-      }
-
-      .metric-stack {
-        display: grid;
-        gap: 12px;
-      }
-
-      .metric-card {
-        padding: 16px 18px;
-        border-radius: 22px;
-        background: rgba(255,255,255,0.04);
-        border: 1px solid rgba(255,255,255,0.08);
-      }
-
-      .metric-label {
-        color: var(--muted);
-        font-size: 12px;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        margin-bottom: 8px;
-      }
-
-      .metric-value {
-        font-size: 34px;
-        font-weight: 800;
-        line-height: 1;
-      }
-
-      .metric-note {
-        font-size: 13px;
-        color: var(--muted);
-        margin-top: 8px;
-      }
-
-      .list {
-        display: grid;
-        gap: 16px;
-      }
-
-      .chat-card {
-        display: grid;
-        gap: 10px;
-      }
-
-      .chat-meta {
-        display: flex;
-        justify-content: space-between;
-        gap: 12px;
-        align-items: center;
-        color: var(--muted);
-        font-size: 13px;
-      }
-
-      .bubble-row {
-        display: flex;
-      }
-
-      .bubble-row.user {
-        justify-content: flex-end;
-      }
-
-      .bubble-row.agent {
-        justify-content: flex-start;
-      }
-
-      .card {
-        padding: 18px 20px;
-        display: grid;
-        gap: 14px;
-        position: relative;
-        overflow: hidden;
-        max-width: min(820px, 100%);
-      }
-
-      .bubble-user {
-        margin-left: auto;
-        background: linear-gradient(180deg, rgba(30,41,59,0.9), rgba(15,23,42,0.88));
-      }
-
-      .bubble-agent {
-        background: linear-gradient(180deg, rgba(17,24,33,0.95), rgba(10,15,22,0.92));
-      }
-
-      .row {
-        display: flex;
-        justify-content: space-between;
-        gap: 16px;
-        align-items: center;
-        flex-wrap: wrap;
-      }
-
-      .title {
-        font-size: 20px;
-        font-weight: 800;
-        position: relative;
-        z-index: 1;
-      }
-
-      .badge {
-        padding: 7px 11px;
-        border-radius: 999px;
-        font-size: 12px;
-        font-weight: 700;
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
-        background: var(--accent-soft);
-        color: var(--accent);
-        border: 1px solid rgba(255,255,255,0.08);
-      }
-
-      .meta {
-        display: flex;
-        gap: 12px;
-        flex-wrap: wrap;
-        color: var(--muted);
-        font-size: 14px;
-      }
-
-      a {
-        color: var(--accent);
-        text-decoration: none;
-        font-weight: 800;
-      }
-
-      .link-chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        padding: 10px 14px;
-        border-radius: 999px;
-        background: rgba(255,255,255,0.06);
-        border: 1px solid rgba(255,255,255,0.08);
-      }
-
-      .empty {
-        padding: 36px;
-        text-align: center;
-        color: var(--muted);
-      }
-
-      .summary {
-        position: relative;
-        z-index: 1;
-        color: rgba(238,247,255,0.92);
-        line-height: 1.55;
-      }
-
-      .prompt-line {
-        color: rgba(255,255,255,0.9);
-        line-height: 1.55;
-      }
-
-      .feed-note {
-        color: var(--muted);
-        font-size: 13px;
-      }
-
-      @media (max-width: 920px) {
-        .hero-grid {
-          grid-template-columns: 1fr;
-        }
-      }
+      .stat-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); font-weight: 600; }
+      .stat-value { font-size: 32px; font-weight: 300; }
+      .hidden-tools { display: none; }
     </style>
   </head>
   <body>
-    <main class="shell">
-      <section class="hero">
-        <div class="hero-grid">
-          <div>
-            <div class="eyebrow">Unity Autonomous Deck</div>
-            <h1>Plan first. Execute with intent.</h1>
-            <p class="subtle">
-              Revisa el DAG, aprueba planes interactivos y sigue la actividad multi-agent desde una consola local pensada para evolucionar más allá de Discord.
-            </p>
-          </div>
-          <div class="metric-stack" id="hero-metrics">
-            <div class="metric-card">
-              <div class="metric-label">Awaiting Approval</div>
-              <div class="metric-value">0</div>
-              <div class="metric-note">Interactive runs paused after planning.</div>
-            </div>
-          </div>
-        </div>
-      </section>
-      <section id="runs" class="list"></section>
-    </main>
-    <script>
-      const statusColors = {
-        queued: '#146c78',
-        planning: '#146c78',
-        awaiting_plan_approval: '#946200',
-        plan_rejected: '#b33f33',
-        running: '#146c78',
-        healing: '#146c78',
-        completed: '#1f7a4d',
-        failed: '#b33f33',
-        cancelled: '#7c8692',
-      };
+    <aside class="sidenav">
+      <div class="sidenav-header">
+        <h2>Unity Deck</h2>
+      </div>
+      <input id="runs-search" class="search-box" type="text" placeholder="Search runs..." />
+      <div id="runs" class="runs-list"></div>
+    </aside>
 
-      function badge(status) {
-        const color = statusColors[status] || '#146c78';
-        return '<span class="badge" style="background:' + color + '18;color:' + color + ';">' + status.replaceAll('_', ' ') + '</span>';
-      }
+    <main class="main-content">
+      <div class="home-container">
+        <div class="greeting">
+          <h1>Good morning.</h1>
+          <p>Here is the current state of your autonomous agents. Select a run from the sidebar to inspect its execution graph, approve plans, or review artifacts.</p>
+        </div>
+        <div class="stats-grid" id="hero-metrics"></div>
+      </div>
+    </main>
+
+    <script>
+      let allRuns = [];
+      const statusColors = { completed: '#4ade80', completed_with_warnings: '#f59e0b', succeeded: '#4ade80', awaiting_plan_approval: '#facc15', pending: '#facc15', failed: '#f87171', blocked: '#f87171', plan_rejected: '#f87171', running: '#60a5fa', healing: '#60a5fa', cancelled: '#9ca3af' };
+      
+      function safe(value) { return String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
       function renderMetrics(items) {
         const awaiting = items.filter(({ run }) => run.status === 'awaiting_plan_approval').length;
         const active = items.filter(({ run }) => run.status === 'running' || run.status === 'healing').length;
         const completed = items.filter(({ run }) => run.status === 'completed').length;
+        const needsReview = items.filter(({ run }) => run.status === 'completed_with_warnings').length;
         const failed = items.filter(({ run }) => run.status === 'failed').length;
-        const container = document.getElementById('hero-metrics');
 
-        container.innerHTML = [
-          ['Awaiting Approval', awaiting, 'Interactive runs paused after planning.'],
-          ['Live Runs', active, 'These runs are currently advancing tasks.'],
-          ['Completed', completed, 'Healthy runs that closed their cycle.'],
-          ['Failed', failed, 'Runs that need follow-up or replanning.'],
-        ].map(function(metric) {
-          return '<div class="metric-card">' +
-            '<div class="metric-label">' + metric[0] + '</div>' +
-            '<div class="metric-value">' + metric[1] + '</div>' +
-            '<div class="metric-note">' + metric[2] + '</div>' +
-          '</div>';
-        }).join('');
+        document.getElementById('hero-metrics').innerHTML = [
+          ['Awaiting Approval', awaiting],
+          ['Active Runs', active],
+          ['Completed', completed],
+          ['Needs Review', needsReview],
+          ['Failed', failed],
+        ].map(m => \`<div class="stat-card"><div class="stat-label">\${m[0]}</div><div class="stat-value">\${m[1]}</div></div>\`).join('');
       }
 
-      function renderRuns(items) {
+      function filterRuns(items) {
+        const search = (document.getElementById('runs-search').value || '').toLowerCase().trim();
+        return items.filter(item => {
+          const haystack = [item.run.projectName, item.run.id, item.run.prompt].join(' ').toLowerCase();
+          return !search || haystack.includes(search);
+        });
+      }
+
+      function renderRunsList(items) {
         const container = document.getElementById('runs');
         if (!items.length) {
-          container.innerHTML = '<div class="card empty">Todavía no hay runs persistidos.</div>';
+          container.innerHTML = '<div class="muted" style="font-size:12px; padding:12px; text-align:center;">No runs found.</div>';
           return;
         }
 
-        container.innerHTML = items.map(({ run, latestPlan, taskCounts }) => {
-          const primaryAction = run.status === 'awaiting_plan_approval' ? 'Review plan' : 'Open command deck';
-          return '<article class="chat-card">' +
-            '<div class="chat-meta">' +
-              '<div><strong>' + run.projectName + '</strong> · ' + run.id + '</div>' +
-              '<div>' + new Date(run.updatedAt).toLocaleString() + '</div>' +
-            '</div>' +
-            '<div class="bubble-row user">' +
-              '<div class="card bubble-user">' +
-                '<div class="meta"><span>user request</span><span>mode: ' + run.mode + '</span></div>' +
-                '<div class="prompt-line">' + run.prompt + '</div>' +
-              '</div>' +
-            '</div>' +
-            '<div class="bubble-row agent">' +
-              '<div class="card bubble-agent">' +
-                '<div class="row">' +
-                  '<div class="title">Unity Agent</div>' +
-                  badge(run.status) +
-                '</div>' +
-                '<div class="summary">' + (latestPlan?.summary || run.summary || 'Waiting for plan synthesis.') + '</div>' +
-                '<div class="meta">' +
-                  '<span>plan: ' + (latestPlan ? latestPlan.status : 'missing') + '</span>' +
-                  '<span>branch: ' + run.branchName + '</span>' +
-                  '<span>ok: ' + taskCounts.succeeded + '</span>' +
-                  '<span>failed: ' + taskCounts.failed + '</span>' +
-                  '<span>blocked: ' + taskCounts.blocked + '</span>' +
-                '</div>' +
-                '<div class="feed-note">Open the run to inspect the graph, approval state and task details.</div>' +
-                '<a class="link-chip" href="/runs/' + run.id + '">' + primaryAction + '</a>' +
-              '</div>' +
-            '</div>' +
-          '</article>';
+        container.innerHTML = items.map(item => {
+          const color = statusColors[item.run.status] || '#d1d5db';
+          const formatStat = item.run.status.replaceAll('_', ' ');
+          return \`<a class="run-nav-item" href="/runs/\${encodeURIComponent(item.run.id)}">
+            <div class="run-nav-title">\${safe(item.run.projectName)}</div>
+            <div class="run-nav-meta">
+              <div class="run-nav-status"><div class="status-dot" style="background:\${color}"></div><span>\${safe(formatStat)}</span></div>
+              <span>\${item.taskCounts?.progress || 0}%</span>
+            </div>
+          </a>\`;
         }).join('');
       }
 
       async function loadRuns() {
         const response = await fetch('/api/runs');
-        const items = await response.json();
-        renderMetrics(items);
-        renderRuns(items);
+        allRuns = await response.json();
+        renderMetrics(allRuns);
+        renderRunsList(filterRuns(allRuns));
       }
 
-      loadRuns();
-      setInterval(loadRuns, 5000);
+      document.getElementById('runs-search').addEventListener('input', () => renderRunsList(filterRuns(allRuns)));
+      loadRuns(); setInterval(loadRuns, 5000);
     </script>
   </body>
 </html>`;
@@ -996,1247 +942,429 @@ function renderRunPage(
   initialPayload?: ReturnType<typeof buildRunPayload> | null,
   requestedTaskId?: string | null,
 ): string {
+  const vm = initialPayload ? buildRunViewModel(initialPayload, requestedTaskId) : null;
   const safeRunId = escapeHtml(runId);
-  const initialSummary = initialPayload?.plan?.summary || initialPayload?.run?.summary || initialPayload?.run?.prompt || 'Loading run details...';
-  const initialUi = initialPayload ? buildInitialRunUi(initialPayload, requestedTaskId) : null;
+  const initialSummary = vm?.plan?.summary || vm?.run?.summary || vm?.run?.prompt || 'Loading run details...';
+  const actionsHtml = vm ? buildActionsHtml(vm.run, vm.plan) : '';
+  const metaHtml = vm ? buildMetaGridHtml(vm) : '';
+  const planMetaHtml = vm ? buildPlanMetaHtml(vm) : '';
+  const eventsHtml = vm ? buildEventsHtml(vm.events) : '';
+  const taskListHtml = vm ? buildTaskListHtml(vm.tasks, vm.selectedTaskId) : '<div class="muted" style="padding:16px;">Loading tasks…</div>';
+  const inspectorHtml = vm ? buildInspectorHtml(vm) : '<div class="muted" style="padding:16px;">Waiting for selection…</div>';
+  const artifactsHtml = vm ? buildArtifactsHtml(vm) : '<div class="muted" style="padding:16px;">No artifacts.</div>';
 
   return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Unity Run ${safeRunId}</title>
+    <title>Run ${safeRunId}</title>
     <style>
-      :root {
-        --bg-1: #0b1016;
-        --bg-2: #121923;
-        --bg-3: #19232f;
-        --panel: rgba(16, 22, 30, 0.8);
-        --panel-border: rgba(148, 163, 184, 0.14);
-        --text: #edf2f7;
-        --muted: #94a3b8;
-        --accent: #cbd5e1;
-        --accent-2: #94a3b8;
-        --accent-3: #64748b;
-        --success: #86efac;
-        --warning: #facc15;
-        --danger: #fb7185;
-        --surface: rgba(255, 255, 255, 0.04);
-        --surface-strong: rgba(255, 255, 255, 0.07);
-        --shadow: 0 30px 80px rgba(0, 0, 0, 0.42);
-      }
-
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        min-height: 100vh;
-        font-family: "Avenir Next", "SF Pro Display", "Segoe UI", sans-serif;
-        color: var(--text);
-        background:
-          radial-gradient(circle at top left, rgba(255,255,255,0.05), transparent 20%),
-          radial-gradient(circle at bottom right, rgba(148,163,184,0.06), transparent 24%),
-          linear-gradient(150deg, var(--bg-1) 0%, var(--bg-2) 56%, var(--bg-3) 100%);
-      }
-
-      body::before {
-        content: '';
-        position: fixed;
-        inset: 0;
-        background-image:
-          linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
-          linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
-        background-size: 40px 40px;
-        mask-image: radial-gradient(circle at center, black 38%, transparent 90%);
-        pointer-events: none;
-        opacity: 0.4;
-      }
-
-      a { color: var(--accent); text-decoration: none; }
-
-      .shell {
-        position: relative;
-        width: min(1400px, calc(100vw - 34px));
-        margin: 20px auto 40px;
-        display: grid;
-        gap: 18px;
-      }
-
-      .panel {
-        background: var(--panel);
-        border: 1px solid var(--panel-border);
-        border-radius: 28px;
-        backdrop-filter: blur(24px);
-        box-shadow: var(--shadow);
-      }
-
-      .hero {
-        padding: 28px;
-        display: grid;
-        gap: 16px;
-        overflow: hidden;
-        position: relative;
-      }
-
-      .hero::after {
-        content: '';
-        position: absolute;
-        right: -160px;
-        top: -170px;
-        width: 420px;
-        height: 420px;
-        border-radius: 50%;
-        background: radial-gradient(circle, rgba(255,255,255,0.08) 0%, transparent 70%);
-        pointer-events: none;
-      }
-
-      .hero-top {
-        display: flex;
-        justify-content: space-between;
-        gap: 20px;
-        flex-wrap: wrap;
-        align-items: flex-start;
-      }
-
-      .hero h1 {
-        margin: 8px 0 10px;
-        font-size: clamp(32px, 4vw, 54px);
-        letter-spacing: -0.04em;
-        line-height: 0.94;
-      }
-
-      .subtle {
-        color: var(--muted);
-        line-height: 1.55;
-      }
-
-      .eyebrow {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        padding: 8px 12px;
-        border-radius: 999px;
-        background: rgba(255,255,255,0.05);
-        border: 1px solid rgba(255,255,255,0.08);
-        color: var(--accent);
-        font-size: 12px;
-        font-weight: 800;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-      }
-
-      .meta-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-        gap: 12px;
-      }
-
-      .meta-card, .task-card, .event-card, .artifact-card {
-        background: var(--surface);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 20px;
-      }
-
-      .meta-card {
-        padding: 14px 16px;
-      }
-
-      .meta-label {
-        font-size: 12px;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-        color: var(--muted);
-        margin-bottom: 6px;
-      }
-
-      .meta-value {
-        font-size: 16px;
-        font-weight: 700;
-      }
-
-      .actions {
-        display: flex;
-        gap: 12px;
-        flex-wrap: wrap;
-        align-items: center;
-      }
-
-      button {
-        border: 0;
-        border-radius: 999px;
-        padding: 12px 18px;
-        font: inherit;
-        font-weight: 800;
-        cursor: pointer;
-        transition: transform 140ms ease, opacity 140ms ease;
-      }
-
-      button:hover {
-        transform: translateY(-1px);
-      }
-
-      button:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
-        transform: none;
-      }
-
-      .actions form {
-        margin: 0;
-      }
-
-      .primary { background: linear-gradient(135deg, #e2e8f0, #94a3b8); color: #0f172a; }
-      .secondary { background: rgba(255,255,255,0.07); color: var(--text); border: 1px solid rgba(255,255,255,0.08); }
-      .danger { background: linear-gradient(135deg, #fb7185, #ef4444); color: white; }
-
-      .layout {
-        display: grid;
-        grid-template-columns: minmax(0, 1.65fr) minmax(340px, 0.95fr);
-        gap: 18px;
-        align-items: start;
-      }
-
-      .stack {
-        display: grid;
-        gap: 18px;
-      }
-
-      .section {
-        padding: 22px;
-        display: grid;
-        gap: 16px;
-      }
-
-      .section h2 {
-        margin: 0;
-        font-size: 20px;
-      }
-
-      .section-header {
-        display: flex;
-        justify-content: space-between;
-        gap: 14px;
-        flex-wrap: wrap;
-        align-items: center;
-      }
-
-      .section-note {
-        color: var(--muted);
-        font-size: 14px;
-      }
-
-      .graph-shell {
-        position: relative;
-        min-height: 520px;
-        border-radius: 24px;
-        overflow: hidden;
-        background:
-          linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.015)),
-          radial-gradient(circle at top left, rgba(255,255,255,0.05), transparent 32%);
-        border: 1px solid rgba(255,255,255,0.06);
-      }
-
-      .graph-shell::before {
-        content: '';
-        position: absolute;
-        inset: 0;
-        background-image:
-          linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px),
-          linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px);
-        background-size: 28px 28px;
-        opacity: 0.55;
-        pointer-events: none;
-      }
-
-      .graph-toolbar {
-        position: absolute;
-        top: 16px;
-        left: 16px;
-        right: 16px;
-        display: flex;
-        justify-content: space-between;
-        gap: 12px;
-        z-index: 2;
-        pointer-events: none;
-      }
-
-      .toolbar-chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        padding: 9px 12px;
-        border-radius: 999px;
-        background: rgba(4,16,25,0.7);
-        border: 1px solid rgba(255,255,255,0.08);
-        color: var(--muted);
-        font-size: 12px;
-        font-weight: 700;
-      }
-
-      .graph-scroll {
-        overflow: auto;
-        padding: 72px 20px 20px;
-      }
-
-      svg {
-        display: block;
-        min-width: 100%;
-      }
-
-      .lane-label {
-        fill: rgba(255,255,255,0.92);
-        font-size: 14px;
-        font-weight: 800;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-      }
-
-      .lane-sub {
-        fill: var(--muted);
-        font-size: 11px;
-      }
-
-      .edge {
-        fill: none;
-        stroke-width: 3;
-        opacity: 0.68;
-      }
-
-      .node-group {
-        cursor: pointer;
-      }
-
-      .node-card {
-        stroke-width: 1.5;
-      }
-
-      .node-title {
-        fill: white;
-        font-size: 16px;
-        font-weight: 800;
-      }
-
-      .node-subtitle,
-      .node-foot {
-        fill: rgba(241,248,255,0.78);
-        font-size: 12px;
-      }
-
-      .status-ring {
-        fill: rgba(255,255,255,0.12);
-      }
-
-      .status-dot {
-        filter: drop-shadow(0 0 8px currentColor);
-      }
-
-      .inspector {
-        position: sticky;
-        top: 16px;
-      }
-
-      .inspector-stack {
-        display: grid;
-        gap: 16px;
-      }
-
-      .task-card {
-        padding: 16px 18px;
-        display: grid;
-        gap: 10px;
-      }
-
-      .task-title {
-        font-size: 17px;
-        font-weight: 800;
-      }
-
-      .chip-row {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-      }
-
-      .chip {
-        padding: 6px 10px;
-        border-radius: 999px;
-        background: rgba(255,255,255,0.06);
-        color: var(--text);
-        font-size: 12px;
-        border: 1px solid rgba(255,255,255,0.08);
-      }
-
-      .event-list, .artifact-list {
-        display: grid;
-        gap: 12px;
-        max-height: 420px;
-        overflow: auto;
-      }
-
-      .event-card, .artifact-card {
-        padding: 14px;
-        display: grid;
-        gap: 8px;
-        position: relative;
-      }
-
-      pre {
-        margin: 0;
-        white-space: pre-wrap;
-        word-break: break-word;
-        font-size: 13px;
-        line-height: 1.45;
-        font-family: "SFMono-Regular", "Consolas", monospace;
-      }
-
-      textarea {
-        width: 100%;
-        min-height: 88px;
-        resize: vertical;
-        border-radius: 18px;
-        border: 1px solid rgba(255,255,255,0.1);
-        padding: 14px;
-        font: inherit;
-        color: var(--text);
-        background: rgba(255,255,255,0.05);
-      }
-
-      .status-badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        padding: 8px 12px;
-        border-radius: 999px;
-        font-size: 12px;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        border: 1px solid rgba(255,255,255,0.08);
-      }
-
-      .muted {
-        color: var(--muted);
-      }
-
-      .timeline {
-        position: relative;
-        display: grid;
-        gap: 14px;
-      }
-
-      .timeline::before {
-        content: '';
-        position: absolute;
-        left: 11px;
-        top: 8px;
-        bottom: 8px;
-        width: 2px;
-        background: linear-gradient(180deg, rgba(110,240,226,0.42), rgba(255,255,255,0.06));
-      }
-
-      .timeline-item {
-        position: relative;
-        padding-left: 30px;
-      }
-
-      .timeline-dot {
-        position: absolute;
-        left: 4px;
-        top: 10px;
-        width: 16px;
-        height: 16px;
-        border-radius: 50%;
-        border: 2px solid rgba(255,255,255,0.16);
-        box-shadow: 0 0 0 6px rgba(255,255,255,0.02);
-      }
-
-      .inspector-empty {
-        padding: 28px;
-        text-align: center;
-        color: var(--muted);
-      }
-
-      .artifact-mini {
-        max-height: 280px;
-        overflow: auto;
-      }
-
-      .task-list {
-        display: grid;
-        gap: 10px;
-      }
-
-      .task-list-item {
-        display: grid;
-        gap: 10px;
-        padding: 14px 16px;
-        border-radius: 18px;
-        background: rgba(255,255,255,0.035);
-        border: 1px solid rgba(255,255,255,0.08);
-        transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
-      }
-
-      .task-list-item:hover {
-        transform: translateY(-1px);
-        border-color: rgba(255,255,255,0.18);
-        background: rgba(255,255,255,0.05);
-      }
-
-      .task-list-item.active {
-        border-color: rgba(255,255,255,0.32);
-        background: rgba(255,255,255,0.07);
-      }
-
-      .task-list-top {
-        display: flex;
-        justify-content: space-between;
-        gap: 12px;
-        align-items: flex-start;
-      }
-
-      .task-list-title {
-        font-size: 15px;
-        font-weight: 800;
-        color: var(--text);
-      }
-
-      .task-list-meta {
-        display: flex;
-        justify-content: space-between;
-        gap: 12px;
-        flex-wrap: wrap;
-        color: var(--muted);
-        font-size: 12px;
-      }
-
-      .task-list-empty {
-        padding: 18px;
-        border-radius: 18px;
-        background: rgba(255,255,255,0.035);
-        border: 1px solid rgba(255,255,255,0.08);
-        color: var(--muted);
-      }
-
-      .prompt-card {
-        background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.015));
-      }
-
-      @media (max-width: 980px) {
-        .layout {
-          grid-template-columns: 1fr;
-        }
-
-        .inspector {
-          position: static;
-        }
-      }
+      ${GLOBAL_CSS}
+      
+      .topbar { padding: 32px 48px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 24px; }
+      .topbar-main { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; flex-wrap: wrap; }
+      .topbar-titles h1 { margin: 0 0 8px 0; font-size: 24px; font-weight: 500; letter-spacing: -0.02em; }
+      .topbar-titles .subtle { font-size: 14px; line-height: 1.5; color: var(--text-muted); max-width: 800px; }
+      
+      .actions { display: flex; gap: 12px; }
+      button { border: none; border-radius: 8px; padding: 10px 16px; font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; }
+      button:hover { opacity: 0.9; }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .btn-primary { background: var(--text-main); color: var(--bg-app); }
+      .btn-secondary { background: var(--bg-surface); border: 1px solid var(--border); color: var(--text-main); }
+      .btn-danger { background: #ef4444; color: white; }
+
+      .progress-track { width: 100%; height: 6px; border-radius: 99px; background: var(--bg-surface); overflow: hidden; margin-top: 8px; }
+      .progress-bar { height: 100%; background: #4ade80; transition: width 0.3s ease; }
+
+      .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+      .meta-card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; display: flex; flex-direction: column; gap: 4px; }
+      .meta-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); font-weight: 600; }
+      .meta-value { font-size: 14px; font-weight: 500; }
+      
+      .status-badge { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 99px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+
+      .dashboard-layout { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 24px; padding: 32px 48px; align-items: start; }
+      @media (max-width: 1200px) { .dashboard-layout { grid-template-columns: 1fr; } }
+      
+      .section { display: flex; flex-direction: column; gap: 16px; margin-bottom: 32px; }
+      .section-header h2 { margin: 0; font-size: 16px; font-weight: 500; }
+      .section-note { font-size: 13px; color: var(--text-muted); }
+
+      .graph-shell { position: relative; background: var(--bg-app); border: 1px solid var(--border); border-radius: var(--radius); min-height: 400px; overflow: hidden; }
+      .graph-shell::before { content: ''; position: absolute; inset: 0; background-image: radial-gradient(circle at center, #27272a 1px, transparent 1px); background-size: 24px 24px; opacity: 0.4; pointer-events: none; }
+      .graph-toolbar { position: absolute; top: 16px; left: 16px; display: flex; gap: 8px; z-index: 2; }
+      .toolbar-chip { background: rgba(24,24,27,0.8); backdrop-filter: blur(8px); border: 1px solid var(--border); padding: 6px 12px; border-radius: 99px; font-size: 12px; font-weight: 500; color: var(--text-muted); }
+      .graph-scroll { overflow: auto; padding: 60px 20px 20px; }
+      
+      .lane-label { fill: var(--text-main); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+      .lane-sub { fill: var(--text-muted); font-size: 11px; }
+      .node-group { cursor: pointer; transition: transform 0.1s; }
+      .node-group:hover { transform: translateY(-2px); }
+      .node-title { fill: var(--text-main); font-size: 14px; font-weight: 600; }
+      .node-subtitle { fill: var(--text-muted); font-size: 11px; font-family: monospace; }
+      .node-foot { fill: var(--text-muted); font-size: 12px; }
+
+      .kv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .task-card, .event-card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+      .task-title { font-weight: 600; margin-bottom: 8px; }
+      
+      .chip-row { display: flex; gap: 8px; flex-wrap: wrap; }
+      .chip { padding: 4px 10px; border-radius: 99px; background: var(--bg-app); border: 1px solid var(--border); font-size: 11px; color: var(--text-muted); }
+      
+      .task-list { display: flex; flex-direction: column; gap: 8px; }
+      .task-list-item { display: flex; flex-direction: column; padding: 16px; background: var(--bg-surface); border: 1px solid transparent; border-radius: 10px; transition: all 0.15s; }
+      .task-list-item:hover { border-color: var(--border); }
+      .task-list-item.active { border-color: var(--border); background: #27272a40; }
+      .task-list-top { display: flex; justify-content: space-between; align-items: flex-start; }
+      .task-list-title { font-weight: 500; font-size: 14px; }
+      .task-list-meta { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-muted); }
+      
+      .timeline { position: relative; display: flex; flex-direction: column; gap: 16px; }
+      .timeline::before { content: ''; position: absolute; left: 7px; top: 8px; bottom: 8px; width: 2px; background: var(--border); }
+      .timeline-item { position: relative; padding-left: 28px; }
+      .timeline-dot { position: absolute; left: 0; top: 12px; width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--border); }
+      .event-top { display: flex; justify-content: space-between; align-items: center; }
+
+      .filters-row { display: flex; gap: 12px; margin-bottom: 12px; }
+      .input-base { background: var(--bg-surface); border: 1px solid var(--border); color: var(--text-main); padding: 10px 14px; border-radius: 8px; font-size: 13px; flex: 1; outline: none; }
+      .input-base:focus { border-color: #52525b; }
+      select.input-base { flex: 0 0 auto; padding-right: 32px; }
+      textarea.input-base { min-height: 80px; resize: vertical; width: 100%; margin-bottom: 12px; }
     </style>
   </head>
   <body>
-    <main class="shell">
-      <section class="panel hero">
-        <div class="hero-top">
-          <div>
-            <div class="eyebrow">Unity Interactive Command Deck</div>
-            <a href="/">← Back to runs</a>
-            <h1 id="hero-title">Run ${safeRunId}</h1>
+    <aside class="sidenav">
+      <div class="sidenav-header">
+        <a href="/">Unity Deck</a>
+      </div>
+      <input id="runs-search" class="search-box" type="text" placeholder="Search runs..." />
+      <div id="runs" class="runs-list"></div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div class="topbar-main">
+          <div class="topbar-titles">
+            <h1 id="hero-title">${safeText(vm?.run.projectName)} · ${safeRunId}</h1>
             <div id="hero-summary" class="subtle">${escapeHtml(initialSummary)}</div>
           </div>
-          <div class="actions" id="actions">${initialUi?.actionsHtml || ''}</div>
+          <div id="actions">${actionsHtml}</div>
         </div>
-        <div id="meta-grid" class="meta-grid">${initialUi?.metaHtml || ''}</div>
-      </section>
+        <div>
+          <div style="display:flex; justify-content:space-between; font-size:12px; color:var(--text-muted); font-weight:600; margin-bottom:4px;">
+            <span>RUN PROGRESS</span>
+            <span id="progress-value">${vm ? vm.counts.progress : 0}%</span>
+          </div>
+          <div class="progress-track">
+            <div id="progress-bar" class="progress-bar" style="width:${vm ? vm.counts.progress : 0}%;"></div>
+          </div>
+        </div>
+        <div id="meta-grid" class="meta-grid">${metaHtml}</div>
+      </header>
 
-      <section class="layout">
+      <div class="dashboard-layout">
         <div class="stack">
-          <section class="panel section">
-              <div class="section-header">
-                <div>
-                  <h2>Execution Flow</h2>
-                  <div class="section-note">Modern DAG view of the plan, dependencies and live task state.</div>
-                </div>
-              <div class="chip-row" id="graph-summary">${initialUi?.graphSummaryHtml || ''}</div>
+          <section class="section">
+            <div class="section-header">
+              <h2>Execution Flow</h2>
+              <div class="section-note">Dependency graph and live execution posture.</div>
             </div>
             <div class="graph-shell">
               <div class="graph-toolbar">
-                <div class="toolbar-chip" id="graph-mode-chip">${escapeHtml(
-                  initialUi?.graphModeMessage || 'Preparing graph…',
-                )}</div>
-                <div class="toolbar-chip" id="graph-selection-chip">${escapeHtml(
-                  initialUi?.graphSelectionMessage || 'Select a node to inspect it.',
-                )}</div>
+                <div class="toolbar-chip" id="graph-mode-chip">Loading phase...</div>
+                <div class="toolbar-chip" id="graph-selection-chip">No selection</div>
               </div>
-              <div class="graph-scroll">
-                <svg
-                  id="graph-stage"
-                  role="img"
-                  aria-label="Run task graph"
-                  viewBox="${escapeHtml(initialUi?.graphViewBox || '0 0 1200 620')}"
-                  width="${escapeHtml(String(initialUi?.graphWidth || 1200))}"
-                  height="${escapeHtml(String(initialUi?.graphHeight || 620))}"
-                >${initialUi?.graphSvgInner || ''}</svg>
+              <div class="graph-scroll" id="graph-scroll">
+                <svg id="graph-stage" role="img" aria-label="Run task graph" viewBox="${escapeHtml(vm?.graph.viewBox || '0 0 1200 620')}" width="${escapeHtml(String(vm?.graph.width || 1200))}" height="${escapeHtml(String(vm?.graph.height || 620))}">${vm?.graph.svgInner || ''}</svg>
               </div>
             </div>
           </section>
 
-          <section class="panel section">
+          <section class="section">
             <div class="section-header">
-              <div>
-                <h2>All Tasks</h2>
-                <div class="section-note">Every task in the run, including plan-preview nodes before approval.</div>
-              </div>
+              <h2>Task List</h2>
             </div>
-            <div id="task-list" class="task-list">${initialUi?.taskListHtml || '<div class="task-list-empty">Loading tasks…</div>'}</div>
+            <div class="filters-row">
+              <input id="task-search" class="input-base" type="text" placeholder="Search tasks..." />
+              <select id="task-status-filter" class="input-base">
+                <option value="all">All Statuses</option>
+                <option value="pending">Pending</option>
+                <option value="running">Running</option>
+                <option value="succeeded">Succeeded</option>
+                <option value="failed">Failed</option>
+              </select>
+            </div>
+            <div id="task-list" class="task-list">${taskListHtml}</div>
           </section>
-
-          <section class="panel section prompt-card">
-            <div class="section-header">
-              <div>
-                <h2>Run Prompt</h2>
-                <div class="section-note">Original instruction that generated this plan.</div>
-              </div>
-            </div>
-            <pre id="run-prompt">${escapeHtml(initialPayload?.run?.prompt || '')}</pre>
-          </section>
-
-          <section class="panel section">
-            <div class="section-header">
-              <div>
-                <h2>Run Timeline</h2>
-                <div class="section-note">Chronological stream of orchestration, validation and approval events.</div>
-              </div>
-            </div>
-            <div id="events" class="timeline">${initialUi?.eventsHtml || ''}</div>
+          
+          <section class="section">
+            <div class="section-header"><h2>Timeline</h2></div>
+            <div id="events" class="timeline">${eventsHtml}</div>
           </section>
         </div>
 
         <aside class="inspector">
-          <div class="inspector-stack">
-            <section class="panel section">
-              <div class="section-header">
-                <div>
-                  <h2>Plan Lifecycle</h2>
-                  <div class="section-note">Approval gate and execution posture for this run.</div>
-                </div>
-              </div>
-              <div id="plan-meta">${initialUi?.planMetaHtml || ''}</div>
-            </section>
+          <section class="section">
+            <div class="section-header"><h2>Selected Task</h2></div>
+            <div id="task-inspector">${inspectorHtml}</div>
+          </section>
 
-            <section class="panel section">
-              <div class="section-header">
-                <div>
-                  <h2>Selected Task</h2>
-                  <div class="section-note">Click a node in the flowchart to inspect details here.</div>
-                </div>
-              </div>
-              <div id="task-inspector">${initialUi?.inspectorHtml || '<div class="inspector-empty">Waiting for task selection…</div>'}</div>
-            </section>
+          <section class="section">
+            <div class="section-header"><h2>Artifacts</h2></div>
+            <div id="task-artifacts">${artifactsHtml}</div>
+          </section>
 
-            <section class="panel section">
-              <div class="section-header">
-                <div>
-                  <h2>Task Artifacts</h2>
-                  <div class="section-note">Diffs, gate snapshots and other stored outputs for the selected task.</div>
-                </div>
-              </div>
-              <div id="task-artifacts" class="artifact-mini">${initialUi?.artifactsHtml || ''}</div>
-            </section>
-
-            <section class="panel section">
-              <div class="section-header">
-                <div>
-                  <h2>Reject Reason</h2>
-                  <div class="section-note">Only used while the plan is waiting for approval.</div>
-                </div>
-              </div>
-              <textarea id="reject-reason" placeholder="Explain why this plan should be rejected."></textarea>
-            </section>
-          </div>
+          <section class="section">
+            <div class="section-header"><h2>Plan Details</h2></div>
+            <div id="plan-meta">${planMetaHtml}</div>
+            <div style="margin-top:16px;">
+              <textarea id="reject-reason" class="input-base" placeholder="Reason for rejection (if applicable)..."></textarea>
+            </div>
+          </section>
         </aside>
-      </section>
+      </div>
     </main>
+
     <script>
-      const runId = ${JSON.stringify(runId)};
-      const initialPayload = ${serializeForScript(initialPayload || null)};
-      const initialSelectedTaskId = ${serializeForScript(initialUi?.selectedTaskId || null)};
-      const statusColors = {
-        queued: '#94a3b8',
-        planning: '#cbd5e1',
-        awaiting_plan_approval: '#facc15',
-        plan_rejected: '#fb7185',
-        running: '#e2e8f0',
-        healing: '#cbd5e1',
-        completed: '#86efac',
-        failed: '#fb7185',
-        cancelled: '#64748b',
-        pending: '#facc15',
-        succeeded: '#86efac',
-        blocked: '#fb7185',
-        skipped: '#64748b',
-      };
-      let latestPayload = null;
-      let selectedTaskId = initialSelectedTaskId;
+      const currentRunId = ${JSON.stringify(runId)};
+      let latestPayload = ${serializeForScript(initialPayload || null)};
+      let selectedTaskId = ${serializeForScript(vm?.selectedTaskId || null)};
+      let taskSearch = '';
+      let taskStatusFilter = 'all';
 
-      function safe(value) {
-        return String(value || '')
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;')
-          .replace(/"/g, '&quot;')
-          .replace(/'/g, '&#39;');
+      const statusColors = { completed: '#4ade80', completed_with_warnings: '#f59e0b', succeeded: '#4ade80', awaiting_plan_approval: '#facc15', pending: '#facc15', failed: '#f87171', blocked: '#f87171', plan_rejected: '#f87171', running: '#60a5fa', healing: '#60a5fa', cancelled: '#9ca3af' };
+      
+      function safe(v) { return String(v||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+      function truncate(v, m) { const s=String(v||''); return s.length>m ? s.slice(0,m-1)+'…' : s; }
+      function formatDate(v) { return v ? new Date(v).toLocaleString() : '—'; }
+      function statusBadge(s) { const c = statusColors[s]||'#d1d5db'; return \`<span class="status-badge" style="background:\${c}15;color:\${c};border:1px solid \${c}30;">\${safe(s.replaceAll('_',' '))}</span>\`; }
+
+      // --- Sidenav Logic ---
+      let allRuns = [];
+      function renderRunsList(items) {
+        const container = document.getElementById('runs');
+        if (!items.length) { container.innerHTML = '<div class="muted" style="font-size:12px; padding:12px;">No runs found.</div>'; return; }
+        container.innerHTML = items.map(item => {
+          const color = statusColors[item.run.status] || '#d1d5db';
+          const isActive = item.run.id === currentRunId ? ' active' : '';
+          return \`<a class="run-nav-item\${isActive}" href="/runs/\${encodeURIComponent(item.run.id)}">
+            <div class="run-nav-title">\${safe(item.run.projectName)}</div>
+            <div class="run-nav-meta">
+              <div class="run-nav-status"><div class="status-dot" style="background:\${color}"></div><span>\${safe(item.run.status.replaceAll('_',' '))}</span></div>
+              <span>\${item.taskCounts?.progress || 0}%</span>
+            </div>
+          </a>\`;
+        }).join('');
       }
-
-      function statusBadge(status) {
-        const color = statusColors[status] || '#146c78';
-        return '<span class="status-badge" style="background:' + color + '18;color:' + color + ';">' + status.replaceAll('_', ' ') + '</span>';
+      async function loadSidenavRuns() {
+        const res = await fetch('/api/runs');
+        allRuns = await res.json();
+        const search = document.getElementById('runs-search').value.toLowerCase().trim();
+        const filtered = allRuns.filter(i => !search || [i.run.projectName, i.run.id].join(' ').toLowerCase().includes(search));
+        renderRunsList(filtered);
       }
+      document.getElementById('runs-search').addEventListener('input', loadSidenavRuns);
 
-      function statusColor(status) {
-        return statusColors[status] || '#cbd5e1';
-      }
-
-      function setGraphChrome(modeMessage, selectionMessage) {
-        const modeChip = document.getElementById('graph-mode-chip');
-        const selectionChip = document.getElementById('graph-selection-chip');
-        if (modeChip) modeChip.textContent = modeMessage;
-        if (selectionChip) selectionChip.textContent = selectionMessage;
-      }
-
-      function formatDate(value) {
-        if (!value) return '—';
-        return new Date(value).toLocaleString();
-      }
-
+      // --- Data Processing Helpers ---
       function normalizeTasks(run, plan, tasks) {
-        if (tasks && tasks.length) {
-          return tasks.slice().sort(function(left, right) {
-            return left.orderIndex - right.orderIndex;
-          });
-        }
-
-        const drafts = plan && plan.rawPlan && Array.isArray(plan.rawPlan.tasks) ? plan.rawPlan.tasks : [];
-        const titleToId = {};
-
-        drafts.forEach(function(task, index) {
-          titleToId[task.title] = 'draft-' + index;
-        });
-
-        return drafts.map(function(task, index) {
-          return {
-            id: titleToId[task.title] || ('draft-' + index),
-            runId: run.id,
-            title: task.title,
-            prompt: task.prompt,
-            role: task.role || 'executor',
-            kind: task.kind || 'implement',
-            status: run.status === 'plan_rejected' ? 'blocked' : 'pending',
-            writeScope: Array.isArray(task.writeScope) ? task.writeScope : ['.'],
-            dependencies: Array.isArray(task.dependencies)
-              ? task.dependencies.map(function(dependencyTitle) { return titleToId[dependencyTitle]; }).filter(Boolean)
-              : [],
-            attempts: 0,
-            branchName: null,
-            worktreePath: null,
-            commitSha: null,
-            commitMessage: null,
-            outputSummary: task.rationale || null,
-            validationSummary: null,
-            orderIndex: index,
-            createdAt: run.createdAt,
-            updatedAt: run.updatedAt,
-            startedAt: null,
-            finishedAt: null,
-            planOnly: true,
-          };
-        });
+        if (tasks && tasks.length) return tasks.slice().sort((l,r)=>l.orderIndex-r.orderIndex).map(t=>({...t, writeScope: t.writeScope||['.'], dependencies: t.dependencies||[]}));
+        const drafts = plan?.rawPlan?.tasks || [];
+        const t2id = {}; drafts.forEach((t,i) => t2id[t.title]='draft-'+i);
+        return drafts.map((t,i) => ({
+          id: t2id[t.title]||'draft-'+i, runId: run.id, parentTaskId: null, title: t.title, prompt: t.prompt, role: t.role||'executor', kind: t.kind||'implement',
+          status: run.status==='plan_rejected'?'blocked':'pending', writeScope: t.writeScope||['.'], dependencies: (t.dependencies||[]).map(d=>t2id[d]).filter(Boolean),
+          attempts: 0, branchName: null, worktreePath: null, commitSha: null, commitMessage: null, outputSummary: t.rationale||null, validationSummary: null,
+          orderIndex: i, createdAt: run.createdAt, updatedAt: run.updatedAt, startedAt: null, finishedAt: null, planOnly: true
+        }));
       }
 
       function buildLevels(tasks) {
-        const byId = new Map(tasks.map(function(task) { return [task.id, task]; }));
-        const levelMemo = new Map();
-
-        function computeLevel(taskId, trail) {
-          if (levelMemo.has(taskId)) {
-            return levelMemo.get(taskId);
-          }
-
-          if (trail.has(taskId)) {
-            return 0;
-          }
-
-          const task = byId.get(taskId);
-          if (!task) {
-            return 0;
-          }
-
-          trail.add(taskId);
-          const deps = (task.dependencies || []).filter(function(dependencyId) { return byId.has(dependencyId); });
-          const level = deps.length
-            ? Math.max.apply(null, deps.map(function(dependencyId) { return computeLevel(dependencyId, trail); })) + 1
-            : 0;
-          trail.delete(taskId);
-          levelMemo.set(taskId, level);
-          return level;
+        const byId = new Map(tasks.map(t => [t.id, t]));
+        const memo = new Map();
+        function compute(id, trail) {
+          if(memo.has(id)) return memo.get(id);
+          if(trail.has(id)) return 0;
+          const t = byId.get(id); if(!t) return 0;
+          trail.add(id);
+          const deps = (t.dependencies||[]).filter(d => byId.has(d));
+          const lvl = deps.length ? Math.max(...deps.map(d => compute(d, trail))) + 1 : 0;
+          trail.delete(id); memo.set(id, lvl); return lvl;
         }
-
-        tasks.forEach(function(task) {
-          computeLevel(task.id, new Set());
-        });
-
-        const levels = [];
-        tasks.forEach(function(task) {
-          const level = levelMemo.get(task.id) || 0;
-          if (!levels[level]) {
-            levels[level] = [];
-          }
-          levels[level].push(task);
-        });
-
-        levels.forEach(function(column) {
-          column.sort(function(left, right) {
-            return left.orderIndex - right.orderIndex;
-          });
-        });
-
-        return levels.filter(Boolean);
+        tasks.forEach(t => compute(t.id, new Set()));
+        const lvls = [];
+        tasks.forEach(t => { const l = memo.get(t.id)||0; if(!lvls[l]) lvls[l]=[]; lvls[l].push(t); });
+        lvls.forEach(c => c.sort((l,r)=>l.orderIndex-r.orderIndex));
+        return lvls.filter(Boolean);
       }
 
-      function truncate(value, maxLength) {
-        const input = String(value || '');
-        return input.length > maxLength ? input.slice(0, maxLength - 1) + '…' : input;
+      function getCounts(tasks) {
+        const c = { total: tasks.length, pending:0, running:0, succeeded:0, failed:0, blocked:0, skipped:0, done:0, progress:0 };
+        tasks.forEach(t => { if(c[t.status]!==undefined) c[t.status]++; });
+        c.done = c.succeeded + c.failed + c.blocked + c.skipped;
+        c.progress = c.total ? Math.round((c.done/c.total)*100) : 0;
+        return c;
+      }
+
+      function syncUrl() {
+        const u = new URL(window.location.href);
+        if(selectedTaskId) u.searchParams.set('task', selectedTaskId); else u.searchParams.delete('task');
+        window.history.replaceState({}, '', u.toString());
+      }
+
+      // --- UI Renderers ---
+      function updateTopbar(run, plan, counts) {
+        document.getElementById('hero-title').textContent = run.projectName + ' · ' + run.id;
+        document.getElementById('hero-summary').textContent = plan?.summary || run.summary || run.prompt;
+        document.getElementById('progress-value').textContent = counts.progress + '%';
+        document.getElementById('progress-bar').style.width = counts.progress + '%';
+
+        const cards = [
+          ['Status', statusBadge(run.status)], ['Mode', safe(run.mode)], ['Branch', safe(run.branchName)],
+          ['Plan', plan ? statusBadge(plan.status) : '<span class="muted">Missing</span>'],
+          ['Progress', counts.progress+'%'], ['Tasks', counts.total], ['Running', counts.running], ['Failed', counts.failed]
+        ];
+        document.getElementById('meta-grid').innerHTML = cards.map(c => \`<div class="meta-card"><div class="meta-label">\${c[0]}</div><div class="meta-value">\${c[1]}</div></div>\`).join('');
+
+        const actions = document.getElementById('actions');
+        let actHtml = '';
+        if (run.status === 'awaiting_plan_approval' && plan?.status === 'proposed') {
+          actHtml = \`<button class="btn-primary" id="approve-plan">Approve Plan</button> <button class="btn-danger" id="reject-plan">Reject</button>\`;
+        } else if (run.status === 'running' || run.status === 'healing') {
+          actHtml = \`<button class="btn-secondary" id="cancel-run">Cancel Run</button>\`;
+        }
+        actions.innerHTML = actHtml;
+
+        const bind = (id, fn) => { const el = document.getElementById(id); if(el) el.onclick = async () => { el.disabled = true; await fn(); await loadRunData(); }; }
+        bind('approve-plan', () => fetch('/api/runs/'+currentRunId+'/approve-plan', {method:'POST', body:'{}'}));
+        bind('reject-plan', () => fetch('/api/runs/'+currentRunId+'/reject-plan', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({reason: document.getElementById('reject-reason').value})}));
+        bind('cancel-run', () => fetch('/api/runs/'+currentRunId+'/cancel', {method:'POST', body:'{}'}));
       }
 
       function renderGraph(tasks, run) {
         const stage = document.getElementById('graph-stage');
-        const graphSummary = document.getElementById('graph-summary');
-        const modeChip = document.getElementById('graph-mode-chip');
-        const selectionChip = document.getElementById('graph-selection-chip');
-
         if (!tasks.length) {
-          stage.setAttribute('viewBox', '0 0 900 420');
-          stage.innerHTML = '<text x="100" y="180" class="lane-label">No tasks yet</text><text x="100" y="212" class="lane-sub">The plan exists but no nodes were generated.</text>';
-          graphSummary.innerHTML = '';
-          setGraphChrome('No DAG available', 'Waiting for plan data');
+          stage.innerHTML = '<text x="100" y="180" fill="var(--text-muted)">No tasks generated yet.</text>';
           return;
         }
 
         const levels = buildLevels(tasks);
-        const nodeWidth = 286;
-        const nodeHeight = 118;
-        const columnGap = 170;
-        const rowGap = 168;
-        const marginX = 88;
-        const marginY = 100;
-        const positions = new Map();
-        let maxRows = 1;
+        const nw = 280, nh = 110, cg = 120, rg = 140, mx = 60, my = 80;
+        const pos = new Map(); let maxR = 1;
+        levels.forEach((col, ci) => { maxR = Math.max(maxR, col.length); col.forEach((t, ri) => pos.set(t.id, {x: mx+ci*(nw+cg), y: my+ri*rg})); });
+        
+        const w = mx*2 + levels.length*nw + Math.max(0, levels.length-1)*cg;
+        const h = my + maxR*rg + 90;
+        stage.setAttribute('viewBox', \`0 0 \${w} \${h}\`); stage.setAttribute('width', w); stage.setAttribute('height', h);
 
-        levels.forEach(function(column, columnIndex) {
-          maxRows = Math.max(maxRows, column.length);
-          column.forEach(function(task, rowIndex) {
-            positions.set(task.id, {
-              x: marginX + columnIndex * (nodeWidth + columnGap),
-              y: marginY + rowIndex * rowGap,
-            });
-          });
-        });
-
-        const width = marginX * 2 + Math.max(1, levels.length) * nodeWidth + Math.max(0, levels.length - 1) * columnGap;
-        const height = marginY + maxRows * rowGap + 80;
-        stage.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
-        stage.setAttribute('width', String(width));
-        stage.setAttribute('height', String(height));
-
-        const laneLabels = levels.map(function(column, index) {
-          const x = marginX + index * (nodeWidth + columnGap);
-          return '<text x="' + x + '" y="46" class="lane-label">Phase ' + (index + 1) + '</text>' +
-            '<text x="' + x + '" y="68" class="lane-sub">' + column.length + ' node(s)</text>';
-        }).join('');
-
-        const edges = tasks.flatMap(function(task) {
-          const target = positions.get(task.id);
-          if (!target) return [];
-
-          return (task.dependencies || []).map(function(dependencyId) {
-            const source = positions.get(dependencyId);
-            if (!source) return '';
-            const startX = source.x + nodeWidth;
-            const startY = source.y + nodeHeight / 2;
-            const endX = target.x;
-            const endY = target.y + nodeHeight / 2;
-            const curve = Math.max(56, (endX - startX) / 2);
-            return '<path class="edge" stroke="rgba(203,213,225,0.38)" d="M ' + startX + ' ' + startY +
-              ' C ' + (startX + curve) + ' ' + startY + ', ' + (endX - curve) + ' ' + endY + ', ' + endX + ' ' + endY + '" />';
+        const lanes = levels.map((c, i) => \`<text x="\${mx+i*(nw+cg)}" y="36" class="lane-label">Phase \${i+1}</text><text x="\${mx+i*(nw+cg)}" y="56" class="lane-sub">\${c.length} nodes</text>\`).join('');
+        const edges = tasks.flatMap(t => {
+          const tgt = pos.get(t.id); if(!tgt) return [];
+          return (t.dependencies||[]).map(d => {
+            const src = pos.get(d); if(!src) return '';
+            const sx=src.x+nw, sy=src.y+nh/2, ex=tgt.x, ey=tgt.y+nh/2, cv=Math.max(40, (ex-sx)/2);
+            return \`<path class="edge" stroke="#3f3f46" d="M \${sx} \${sy} C \${sx+cv} \${sy}, \${ex-cv} \${ey}, \${ex} \${ey}" />\`;
           });
         }).join('');
 
-        const nodes = tasks.map(function(task) {
-          const position = positions.get(task.id);
-          const color = statusColor(task.status);
-          const active = selectedTaskId === task.id;
-          const stroke = active ? '#ffffff' : 'rgba(255,255,255,0.1)';
-          const glow = active ? '0 0 18px rgba(255,255,255,0.22)' : 'none';
-          const scopeLabel = truncate((task.writeScope || ['.']).join(', '), 34);
-          const summary = truncate(task.outputSummary || task.validationSummary || task.prompt, 74);
-          const attempts = task.attempts || 0;
-          return '<g class="node-group" data-task-id="' + safe(task.id) + '" transform="translate(' + position.x + ' ' + position.y + ')">' +
-            '<rect class="node-card" x="0" y="0" rx="26" ry="26" width="' + nodeWidth + '" height="' + nodeHeight + '" fill="rgba(7,16,25,0.85)" stroke="' + stroke + '" style="filter:' + glow + ';" />' +
-            '<rect x="18" y="16" rx="14" ry="14" width="56" height="32" fill="' + color + '18" stroke="' + color + '" />' +
-            '<text x="33" y="37" class="node-subtitle" fill="' + color + '">' + safe(task.status.toUpperCase()) + '</text>' +
-            '<circle cx="247" cy="31" r="12" class="status-ring" />' +
-            '<circle cx="247" cy="31" r="6" class="status-dot" fill="' + color + '" />' +
-            '<text x="18" y="66" class="node-title">' + safe(truncate(task.title, 29)) + '</text>' +
-            '<text x="18" y="88" class="node-subtitle">scope · ' + safe(scopeLabel) + '</text>' +
-            '<text x="18" y="106" class="node-foot">' + safe(summary) + '</text>' +
-            '<text x="230" y="105" class="node-foot" text-anchor="end">attempts ' + attempts + '</text>' +
-          '</g>';
+        const nodes = tasks.map(t => {
+          const p = pos.get(t.id), c = statusColors[t.status]||'#d1d5db', act = selectedTaskId===t.id;
+          const stroke = act ? c : '#3f3f46', glow = act ? \`drop-shadow(0 0 10px \${c}40)\` : 'none';
+          return \`<g class="node-group\${act?' active':''}" data-task-id="\${safe(t.id)}" transform="translate(\${p.x} \${p.y})" style="filter:\${glow}">
+            <rect x="0" y="0" rx="12" ry="12" width="\${nw}" height="\${nh}" fill="#18181b" stroke="\${stroke}" stroke-width="1.5"/>
+            <rect x="16" y="16" rx="6" ry="6" width="68" height="24" fill="\${c}15" stroke="\${c}30" />
+            <text x="26" y="32" class="node-subtitle" fill="\${c}">\${safe(t.status.toUpperCase())}</text>
+            <circle cx="250" cy="28" r="4" fill="\${c}" />
+            <text x="16" y="64" class="node-title">\${safe(truncate(t.title, 28))}</text>
+            <text x="16" y="84" class="node-subtitle">scope: \${safe(truncate((t.writeScope||['.']).join(', '), 26))}</text>
+          </g>\`;
         }).join('');
 
-        stage.innerHTML = laneLabels + edges + nodes;
-        graphSummary.innerHTML = [
-          '<span class="chip">nodes ' + tasks.length + '</span>',
-          '<span class="chip">phases ' + levels.length + '</span>',
-          '<span class="chip">mode ' + safe(run.mode) + '</span>',
-        ].join('');
-        const selectedTask = tasks.find(function(task) { return task.id === selectedTaskId; });
-        setGraphChrome(
-          run.status === 'awaiting_plan_approval'
-            ? 'Awaiting approval before execution'
-            : 'Run is ' + run.status.replaceAll('_', ' '),
-          selectedTask
-          ? 'Inspecting ' + selectedTask.title
-          : 'Select a node to inspect it.',
-        );
+        stage.innerHTML = lanes + edges + nodes;
+        const selT = tasks.find(t=>t.id===selectedTaskId);
+        document.getElementById('graph-mode-chip').textContent = run.status.replaceAll('_',' ');
+        document.getElementById('graph-selection-chip').textContent = selT ? 'Inspecting: '+selT.title : 'No selection';
 
-        stage.querySelectorAll('[data-task-id]').forEach(function(node) {
-          node.addEventListener('click', function() {
-            selectedTaskId = node.getAttribute('data-task-id');
-            syncSelectedTaskInUrl();
-            renderAll();
-          });
+        stage.querySelectorAll('.node-group').forEach(n => {
+          n.addEventListener('click', () => { selectedTaskId = n.getAttribute('data-task-id'); syncUrl(); renderAll(); });
         });
       }
 
-      function syncSelectedTaskInUrl() {
-        const url = new URL(window.location.href);
-        if (selectedTaskId) {
-          url.searchParams.set('task', selectedTaskId);
-        } else {
-          url.searchParams.delete('task');
-        }
-        window.history.replaceState({}, '', url.toString());
-      }
-
-      async function sendAction(path, body) {
-        const response = await fetch(path, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body || {}),
+      function renderLists(tasks, events, artifacts) {
+        // Tasks
+        const visibleT = tasks.filter(t => {
+          const s = !taskSearch || [t.title, t.prompt].join(' ').toLowerCase().includes(taskSearch);
+          const f = taskStatusFilter === 'all' || t.status === taskStatusFilter;
+          return s && f;
         });
+        document.getElementById('task-list').innerHTML = visibleT.length ? visibleT.map(t => {
+          const act = selectedTaskId === t.id ? ' active' : '';
+          return \`<button class="task-list-item\${act}" data-tl-id="\${safe(t.id)}" style="text-align:left; cursor:pointer; width:100%; font-family:inherit;">
+            <div class="task-list-top"><div class="task-list-title">\${safe(t.title)}</div>\${statusBadge(t.status)}</div>
+            <div class="chip-row" style="margin-top:8px;"><span class="chip">\${safe(t.kind||'implement')}</span><span class="chip">attempts \${t.attempts||0}</span></div>
+          </button>\`;
+        }).join('') : '<div class="muted">No tasks match.</div>';
+        document.querySelectorAll('[data-tl-id]').forEach(b => b.addEventListener('click', () => { selectedTaskId = b.getAttribute('data-tl-id'); syncUrl(); renderAll(); }));
 
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          throw new Error(payload.error || 'Request failed');
-        }
+        // Events
+        document.getElementById('events').innerHTML = events.length ? events.slice().reverse().map(e => {
+          const c = e.level==='error'?'#f87171':e.level==='warning'?'#facc15':'#60a5fa';
+          return \`<div class="timeline-item"><div class="timeline-dot" style="background:\${c}; box-shadow:0 0 0 4px #09090b"></div>
+            <div class="event-card"><div class="event-top"><strong style="font-size:13px">\${safe(e.type)}</strong><span class="muted" style="font-size:11px">\${formatDate(e.createdAt)}</span></div>
+            <div style="font-size:13px; margin-top:6px; color:var(--text-muted)">\${safe(e.message)}</div></div></div>\`;
+        }).join('') : '<div class="muted">No events.</div>';
 
-        return payload;
-      }
-
-      function renderActions(run, plan) {
-        const actions = document.getElementById('actions');
-        const parts = [];
-
-        if (run.status === 'awaiting_plan_approval' && plan?.status === 'proposed') {
-          parts.push('<button class="primary" id="approve-plan">Approve Plan</button>');
-          parts.push('<button class="danger" id="reject-plan">Reject Plan</button>');
-        }
-
-        if (run.status === 'running' || run.status === 'healing') {
-          parts.push('<button class="secondary" id="cancel-run">Cancel Active Run</button>');
-        }
-
-        actions.innerHTML = parts.join('');
-
-        const approveButton = document.getElementById('approve-plan');
-        if (approveButton) {
-          approveButton.onclick = async () => {
-            approveButton.disabled = true;
-            await sendAction('/api/runs/' + runId + '/approve-plan', {});
-            await loadRun();
-          };
-        }
-
-        const rejectButton = document.getElementById('reject-plan');
-        if (rejectButton) {
-          rejectButton.onclick = async () => {
-            rejectButton.disabled = true;
-            await sendAction('/api/runs/' + runId + '/reject-plan', {
-              reason: document.getElementById('reject-reason').value || 'Plan rejected from the local console.',
-            });
-            await loadRun();
-          };
-        }
-
-        const cancelButton = document.getElementById('cancel-run');
-        if (cancelButton) {
-          cancelButton.onclick = async () => {
-            cancelButton.disabled = true;
-            await sendAction('/api/runs/' + runId + '/cancel', {});
-            await loadRun();
-          };
-        }
-      }
-
-      function renderMeta(run, plan, tasks) {
-        const grid = document.getElementById('meta-grid');
-        const counts = {
-          succeeded: tasks.filter((task) => task.status === 'succeeded').length,
-          failed: tasks.filter((task) => task.status === 'failed').length,
-          blocked: tasks.filter((task) => task.status === 'blocked').length,
-          pending: tasks.filter((task) => task.status === 'pending').length,
-          running: tasks.filter((task) => task.status === 'running').length,
-        };
-
-        const cards = [
-          ['Status', statusBadge(run.status)],
-          ['Mode', run.mode],
-          ['Branch', run.branchName],
-          ['Plan', plan ? statusBadge(plan.status) : 'Missing'],
-          ['Parallel', String(run.maxParallelTasks)],
-          ['Retries', String(run.maxRetriesPerTask)],
-          ['Succeeded', String(counts.succeeded)],
-          ['Running', String(counts.running)],
-          ['Failed', String(counts.failed)],
-          ['Blocked', String(counts.blocked)],
-          ['Pending', String(counts.pending)],
-        ];
-
-        grid.innerHTML = cards.map(([label, value]) =>
-          '<div class="meta-card"><div class="meta-label">' + label + '</div><div class="meta-value">' + value + '</div></div>'
-        ).join('');
-      }
-
-      function renderEvents(events) {
-        const container = document.getElementById('events');
-        container.innerHTML = events.slice().reverse().map((event) => {
-          const levelColor = event.level === 'error'
-            ? statusColor('failed')
-            : event.level === 'warning'
-              ? statusColor('pending')
-              : statusColor('running');
-
-          return '<div class="timeline-item">' +
-            '<div class="timeline-dot" style="background:' + levelColor + ';"></div>' +
-            '<article class="event-card">' +
-              '<div style="display:flex;justify-content:space-between;gap:12px;align-items:center;">' +
-                '<strong>' + safe(event.type) + '</strong>' +
-                '<span class="muted">' + formatDate(event.createdAt) + '</span>' +
-              '</div>' +
-              '<div>' + safe(event.message) + '</div>' +
-              (event.payload ? '<pre>' + safe(JSON.stringify(event.payload, null, 2)) + '</pre>' : '') +
-            '</article>' +
-          '</div>';
-        }).join('') || '<div class="event-card">No events yet.</div>';
-      }
-
-      function renderPlanMeta(run, plan, tasks) {
-        const container = document.getElementById('plan-meta');
-        if (!plan) {
-          container.innerHTML = '<div class="muted">Plan not found.</div>';
+        // Inspector & Artifacts
+        const t = tasks.find(c => c.id === selectedTaskId);
+        if(!t) {
+          document.getElementById('task-inspector').innerHTML = '<div class="muted">Select a task.</div>';
+          document.getElementById('task-artifacts').innerHTML = '<div class="muted">Select a task.</div>';
           return;
         }
+        
+        document.getElementById('task-inspector').innerHTML = \`<div style="display:flex; flex-direction:column; gap:16px;">
+          <div style="display:flex; justify-content:space-between; font-weight:600;">\${safe(t.title)}\${statusBadge(t.status)}</div>
+          <div class="kv-grid">
+            <div class="meta-card"><div class="meta-label">Scope</div><div class="meta-value" style="font-size:12px; font-weight:normal">\${safe((t.writeScope||['.']).join(', '))}</div></div>
+            <div class="meta-card"><div class="meta-label">Dependencies</div><div class="meta-value" style="font-size:12px; font-weight:normal">\${t.dependencies.length?t.dependencies.length:'None'}</div></div>
+          </div>
+          <div class="task-card"><div class="meta-label">Summary</div><pre>\${safe(t.outputSummary || t.prompt || 'No summary.')}</pre></div>
+        </div>\`;
 
-        const runStateCards = [
-          ['Run status', statusBadge(run.status)],
-          ['Plan status', statusBadge(plan.status)],
-          ['Created', formatDate(plan.createdAt)],
-          ['Approved', plan.approvedAt ? (formatDate(plan.approvedAt) + ' · ' + (plan.approvedBy || 'unknown')) : 'Pending'],
-          ['Rejected', plan.rejectedAt ? (formatDate(plan.rejectedAt) + ' · ' + (plan.rejectedBy || 'unknown')) : '—'],
-          ['Tasks in view', String(tasks.length)],
-        ];
-
-        container.innerHTML =
-          runStateCards.map(function(item) {
-            return '<div class="meta-card" style="margin-bottom:12px;">' +
-              '<div class="meta-label">' + item[0] + '</div>' +
-              '<div class="meta-value">' + item[1] + '</div>' +
-            '</div>';
-          }).join('') +
-          '<div class="task-card">' +
-            '<div class="task-title">Plan Summary</div>' +
-            '<pre>' + safe(plan.summary) + '</pre>' +
-          '</div>' +
-          (plan.rejectedReason
-            ? '<div class="task-card"><div class="task-title">Rejected Because</div><pre>' + safe(plan.rejectedReason) + '</pre></div>'
-            : '');
-      }
-
-      function renderTaskList(tasks) {
-        const container = document.getElementById('task-list');
-        if (!container) {
-          return;
-        }
-
-        if (!tasks.length) {
-          container.innerHTML = '<div class="task-list-empty">No tasks available yet.</div>';
-          return;
-        }
-
-        container.innerHTML = tasks.map(function(task) {
-          const active = selectedTaskId === task.id;
-          const dependencyCount = (task.dependencies || []).length;
-          return '<button type="button" class="task-list-item' + (active ? ' active' : '') + '" data-task-list-id="' + safe(task.id) + '">' +
-            '<div class="task-list-top">' +
-              '<div class="task-list-title">' + safe(task.title) + '</div>' +
-              statusBadge(task.status) +
-            '</div>' +
-            '<div class="chip-row">' +
-              '<span class="chip">' + safe(task.kind || 'implement') + '</span>' +
-              '<span class="chip">attempts ' + safe(task.attempts || 0) + '</span>' +
-              (task.planOnly ? '<span class="chip">plan preview</span>' : '') +
-            '</div>' +
-            '<div class="task-list-meta">' +
-              '<span>scope · ' + safe((task.writeScope || ['.']).join(', ')) + '</span>' +
-              '<span>' + (dependencyCount ? (dependencyCount + ' dependenc' + (dependencyCount === 1 ? 'y' : 'ies')) : 'no dependencies') + '</span>' +
-            '</div>' +
-          '</button>';
-        }).join('');
-
-        container.querySelectorAll('[data-task-list-id]').forEach(function(button) {
-          button.addEventListener('click', function() {
-            selectedTaskId = button.getAttribute('data-task-list-id');
-            syncSelectedTaskInUrl();
-            renderAll();
-          });
-        });
-      }
-
-      function renderTaskInspector(tasks, artifacts, events) {
-        const container = document.getElementById('task-inspector');
-        const artifactContainer = document.getElementById('task-artifacts');
-
-        if (!tasks.length) {
-          container.innerHTML = '<div class="inspector-empty">No task data available yet.</div>';
-          artifactContainer.innerHTML = '<div class="artifact-card">No task artifacts yet.</div>';
-          return;
-        }
-
-        if (!selectedTaskId || !tasks.some(function(task) { return task.id === selectedTaskId; })) {
-          selectedTaskId = tasks[0].id;
-        }
-
-        const task = tasks.find(function(candidate) { return candidate.id === selectedTaskId; });
-        if (!task) {
-          container.innerHTML = '<div class="inspector-empty">Selected task is no longer available.</div>';
-          artifactContainer.innerHTML = '<div class="artifact-card">No task artifacts yet.</div>';
-          return;
-        }
-
-        const dependencyTitles = (task.dependencies || []).map(function(dependencyId) {
-          const dependency = tasks.find(function(candidate) { return candidate.id === dependencyId; });
-          return dependency ? dependency.title : dependencyId;
-        });
-        const scopedArtifacts = artifacts.filter(function(artifact) { return artifact.taskId === task.id; });
-        const relatedEvents = events
-          .filter(function(event) { return event.taskId === task.id; })
-          .slice(-4)
-          .reverse();
-
-        container.innerHTML =
-          '<div class="task-card">' +
-            '<div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;">' +
-              '<div class="task-title">' + safe(task.title) + '</div>' +
-              statusBadge(task.status) +
-            '</div>' +
-            '<div class="chip-row">' +
-              '<span class="chip">' + safe(task.kind || 'implement') + '</span>' +
-              '<span class="chip">attempts ' + safe(task.attempts || 0) + '</span>' +
-              (task.planOnly ? '<span class="chip">plan preview</span>' : '') +
-            '</div>' +
-            '<div class="chip-row">' + (task.writeScope || ['.']).map(function(scope) {
-              return '<span class="chip">' + safe(scope) + '</span>';
-            }).join('') + '</div>' +
-            '<div class="muted">' + (dependencyTitles.length ? 'Depends on: ' + dependencyTitles.join(', ') : 'No dependencies') + '</div>' +
-            '<pre>' + safe(task.outputSummary || task.validationSummary || task.prompt || '') + '</pre>' +
-            (task.commitMessage ? '<div class="meta-card"><div class="meta-label">Commit</div><div class="meta-value">' + safe(task.commitMessage) + '</div></div>' : '') +
-            (relatedEvents.length
-              ? '<div class="meta-card"><div class="meta-label">Recent task events</div><pre>' + safe(relatedEvents.map(function(event) {
-                  return '[' + formatDate(event.createdAt) + '] ' + event.type + ' → ' + event.message;
-                }).join('\n\n')) + '</pre></div>'
-              : '') +
-          '</div>';
-
-        artifactContainer.innerHTML = scopedArtifacts.length
-          ? scopedArtifacts.slice().reverse().map(function(artifact) {
-              const preview = artifact.content ? artifact.content.slice(0, 1000) : '(binary or path-only artifact)';
-              return '<article class="artifact-card">' +
-                '<div style="display:flex;justify-content:space-between;gap:12px;align-items:center;">' +
-                  '<strong>' + safe(artifact.type) + '</strong>' +
-                  '<span class="muted">' + formatDate(artifact.createdAt) + '</span>' +
-                '</div>' +
-                (artifact.path ? '<div class="muted">' + safe(artifact.path) + '</div>' : '') +
-                '<pre>' + safe(preview) + '</pre>' +
-              '</article>';
-            }).join('')
-          : '<div class="artifact-card">No artifacts stored for this task yet.</div>';
+        const arts = artifacts.filter(a => a.taskId === t.id);
+        document.getElementById('task-artifacts').innerHTML = arts.length ? arts.map(a => \`<div class="task-card" style="margin-bottom:8px;">
+          <div style="display:flex; justify-content:space-between; margin-bottom:8px; font-size:12px;"><strong>\${safe(a.type)}</strong><span class="muted">\${formatDate(a.createdAt)}</span></div>
+          <pre>\${safe(a.content ? a.content.slice(0,800) : 'binary')}</pre></div>\`).join('') : '<div class="muted">No artifacts stored.</div>';
       }
 
       function renderAll() {
-        if (!latestPayload) {
-          return;
-        }
+        if(!latestPayload) return;
+        const run = latestPayload.run, plan = latestPayload.plan;
+        const tasks = normalizeTasks(run, plan, latestPayload.tasks||[]);
+        const events = latestPayload.events||[], artifacts = latestPayload.artifacts||[];
+        const counts = getCounts(tasks);
 
-        try {
-          const run = latestPayload.run;
-          const plan = latestPayload.plan;
-          const tasks = normalizeTasks(run, plan, latestPayload.tasks || []);
-          const events = latestPayload.events || [];
-          const artifacts = latestPayload.artifacts || [];
-
-          document.getElementById('hero-title').textContent = run.projectName + ' · ' + run.id;
-          document.getElementById('hero-summary').textContent = plan && plan.summary ? plan.summary : (run.summary || run.prompt);
-          document.getElementById('run-prompt').textContent = run.prompt;
-          renderActions(run, plan);
-          renderMeta(run, plan, tasks);
-          renderGraph(tasks, run);
-          renderTaskList(tasks);
-          renderEvents(events);
-          renderPlanMeta(run, plan, tasks);
-          renderTaskInspector(tasks, artifacts, events);
-        } catch (error) {
-          console.error('renderAll failed', error);
-          setGraphChrome('Graph render failed', error && error.message ? error.message : 'Unknown render error');
-        }
+        updateTopbar(run, plan, counts);
+        renderGraph(tasks, run);
+        renderLists(tasks, events, artifacts);
       }
 
-      async function loadRun() {
-        setGraphChrome('Loading graph…', 'Waiting for run data');
+      async function loadRunData() {
         try {
-          const response = await fetch('/api/runs/' + runId);
-          const payload = await response.json();
-
-          if (!response.ok) {
-            document.getElementById('hero-summary').textContent = payload.error || 'Run not found.';
-            setGraphChrome('Run load failed', payload.error || 'Run not found');
-            return;
-          }
-
-          latestPayload = payload;
+          const res = await fetch('/api/runs/'+currentRunId);
+          if(!res.ok) return;
+          latestPayload = await res.json();
           renderAll();
-        } catch (error) {
-          console.error('loadRun failed', error);
-          document.getElementById('hero-summary').textContent = 'Failed to load run data.';
-          setGraphChrome('Run load failed', error && error.message ? error.message : 'Network or parsing error');
-        }
+        } catch(e) { console.error(e); }
       }
 
-      if (initialPayload) {
-        latestPayload = initialPayload;
-        renderAll();
-      } else {
-        loadRun();
-      }
+      document.getElementById('task-search').addEventListener('input', e => { taskSearch = e.target.value.toLowerCase(); renderAll(); });
+      document.getElementById('task-status-filter').addEventListener('change', e => { taskStatusFilter = e.target.value; renderAll(); });
 
-      setTimeout(loadRun, initialPayload ? 600 : 0);
-      setInterval(loadRun, 5000);
+      loadSidenavRuns(); setInterval(loadSidenavRuns, 5000);
+      if(latestPayload) renderAll(); else loadRunData();
+      setInterval(loadRunData, 4000);
     </script>
   </body>
 </html>`;
@@ -2261,7 +1389,7 @@ export function startUnityHttpServer(runtime: RuntimeState) {
       }
 
       if (req.method === 'GET' && pathname === '/') {
-        sendHtml(res, renderHomePage());
+        sendHtml(res, buildHomePageShell());
         return;
       }
 

@@ -97,6 +97,17 @@ interface RunBudgetState {
   exhausted: boolean;
 }
 
+interface RunClosureAssessment {
+  status: RunRecord['status'];
+  outcomeLabel: string;
+  summaryReason: string;
+  warnings: string[];
+  failures: string[];
+  requiredTasksCompleted: number;
+  requiredTasksTotal: number;
+  incompleteFollowUpTasks: number;
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -112,6 +123,15 @@ function formatRemainingTime(remainingMs: number): string {
   }
 
   return `${hours} hour(s) ${minutes} minute(s)`;
+}
+
+function truncateForSummary(value: string, maxLength = 220): string {
+  const trimmed = value.trim().replace(/\s+/g, ' ');
+  if (trimmed.length <= maxLength) {
+    return trimmed;
+  }
+
+  return `${trimmed.slice(0, maxLength - 1)}…`;
 }
 
 function getRunBudgetState(deadline: number): RunBudgetState {
@@ -592,32 +612,151 @@ function selectRunnableBatch(tasks: TaskRecord[], maxParallelTasks: number): Tas
 
 function formatRunSummary(
   run: RunRecord,
+  assessment: RunClosureAssessment,
   tasks: TaskRecord[],
   commitsCreated: number,
+  budgetNote: string | null,
   baselineStaticResults: GateResult[],
   staticResults: GateResult[],
   runtimeResults: GateResult[],
 ): string {
-  const successfulTasks = tasks.filter((task) => task.status === 'succeeded').length;
-  const failedTasks = tasks.filter((task) => task.status === 'failed').length;
-  const blockedTasks = tasks.filter((task) => task.status === 'blocked').length;
-  const newStaticFailures = getNewFailedGates(baselineStaticResults, staticResults);
-  const runtimeFailed = runtimeResults.some((gate) => gate.status === 'failed');
+  const successfulTasks = tasks.filter((task) => task.status === 'succeeded' || task.status === 'skipped').length;
+  const gateOverview = (label: string, results: GateResult[]): string => {
+    if (results.length === 0) {
+      return `${label}: not executed.`;
+    }
+
+    const failed = results.filter((gate) => gate.status === 'failed');
+    const passed = results.filter((gate) => gate.status === 'passed');
+    const skipped = results.filter((gate) => gate.status === 'skipped');
+    const counts = [`passed ${passed.length}`];
+
+    if (failed.length > 0) {
+      counts.push(`failed ${failed.length}`);
+    }
+
+    if (skipped.length > 0) {
+      counts.push(`skipped ${skipped.length}`);
+    }
+
+    const failedNames = failed.map((gate) => gate.name);
+    return `${label}: ${counts.join(', ')}${
+      failedNames.length ? `. Failed gates: ${failedNames.join(', ')}.` : '.'
+    }`;
+  };
 
   return [
     `Run ${run.id} finished on branch ${run.branchName}.`,
-    `Successful tasks: ${successfulTasks}.`,
-    `Failed tasks: ${failedTasks}.`,
-    `Blocked tasks: ${blockedTasks}.`,
-    `Commits created: ${commitsCreated}.`,
-    `Final static gates introduced new failures: ${newStaticFailures.length > 0 ? 'yes' : 'no'}.`,
-    `Runtime gate failed: ${runtimeFailed ? 'yes' : 'no'}.`,
-    baselineStaticResults.length
-      ? `Baseline static gates:\n${summarizeGateResults(baselineStaticResults)}`
-      : 'Baseline static gates were not executed.',
-    staticResults.length ? `Final static gates:\n${summarizeGateResults(staticResults)}` : 'Final static gates were not executed.',
-    runtimeResults.length ? `Runtime gates:\n${summarizeGateResults(runtimeResults)}` : 'Runtime gates were not executed.',
+    `Outcome: ${assessment.outcomeLabel}.`,
+    `Why: ${assessment.summaryReason}`,
+    `Required plan tasks completed: ${assessment.requiredTasksCompleted}/${assessment.requiredTasksTotal}.`,
+    `Total successful tasks: ${successfulTasks}/${tasks.length}.`,
+    `Commits created: ${commitsCreated}/${run.maxCommits}.`,
+    budgetNote ? `Budget note: ${budgetNote}` : 'Budget note: within configured limits.',
+    assessment.warnings.length ? `Warnings:\n- ${assessment.warnings.join('\n- ')}` : 'Warnings: none.',
+    assessment.failures.length ? `Blocking issues:\n- ${assessment.failures.join('\n- ')}` : 'Blocking issues: none.',
+    gateOverview('Baseline static gates', baselineStaticResults),
+    gateOverview('Final static gates', staticResults),
+    gateOverview('Runtime gates', runtimeResults),
+    'Full gate logs are stored in run artifacts.',
   ].join('\n');
+}
+
+function assessRunClosure(
+  planTaskCount: number,
+  tasks: TaskRecord[],
+  baselineStaticResults: GateResult[],
+  finalStaticResults: GateResult[],
+  runtimeResults: GateResult[],
+  budgetNote: string | null,
+): RunClosureAssessment {
+  const requiredTasks = tasks.filter((task) => task.orderIndex < planTaskCount);
+  const followUpTasks = tasks.filter((task) => task.orderIndex >= planTaskCount);
+  const resolvedStatuses = new Set<TaskRecord['status']>(['succeeded', 'skipped']);
+  const requiredIncomplete = requiredTasks.filter((task) => !resolvedStatuses.has(task.status));
+  const incompleteFollowUps = followUpTasks.filter((task) => !resolvedStatuses.has(task.status));
+  const newStaticFailures = getNewFailedGates(baselineStaticResults, finalStaticResults);
+  const runtimeFailures = runtimeResults.filter((gate) => gate.status === 'failed');
+  const warnings: string[] = [];
+  const failures: string[] = [];
+
+  if (requiredTasks.length === 0) {
+    failures.push('The run did not produce any required executable tasks.');
+  }
+
+  if (requiredIncomplete.length > 0) {
+    failures.push(
+      `Required tasks did not finish cleanly: ${requiredIncomplete
+        .slice(0, 4)
+        .map((task) => `${task.title} [${task.status}]`)
+        .join(', ')}${requiredIncomplete.length > 4 ? '…' : ''}.`,
+    );
+  }
+
+  if (newStaticFailures.length > 0) {
+    failures.push(
+      `The run introduced new static gate failures: ${newStaticFailures.map((gate) => gate.name).join(', ')}.`,
+    );
+  }
+
+  if (runtimeFailures.length > 0) {
+    warnings.push(
+      `Runtime verification did not complete: ${runtimeFailures
+        .map((gate) => truncateForSummary(gate.details, 180))
+        .join(' | ')}`,
+    );
+  }
+
+  if (budgetNote) {
+    warnings.push(budgetNote);
+  }
+
+  if (incompleteFollowUps.length > 0) {
+    warnings.push(
+      `Some follow-up tasks were left incomplete: ${incompleteFollowUps
+        .slice(0, 4)
+        .map((task) => `${task.title} [${task.status}]`)
+        .join(', ')}${incompleteFollowUps.length > 4 ? '…' : ''}.`,
+    );
+  }
+
+  if (failures.length > 0) {
+    return {
+      status: 'failed',
+      outcomeLabel: 'failed',
+      summaryReason: failures[0],
+      warnings,
+      failures,
+      requiredTasksCompleted: requiredTasks.length - requiredIncomplete.length,
+      requiredTasksTotal: requiredTasks.length,
+      incompleteFollowUpTasks: incompleteFollowUps.length,
+    };
+  }
+
+  if (warnings.length > 0) {
+    return {
+      status: 'completed_with_warnings',
+      outcomeLabel: 'completed with warnings',
+      summaryReason:
+        'Primary plan tasks were completed, but the run needs manual follow-up for remaining warnings.',
+      warnings,
+      failures,
+      requiredTasksCompleted: requiredTasks.length,
+      requiredTasksTotal: requiredTasks.length,
+      incompleteFollowUpTasks: incompleteFollowUps.length,
+    };
+  }
+
+  return {
+    status: 'completed',
+    outcomeLabel: 'completed',
+    summaryReason: 'All required plan tasks completed cleanly and no new blocking gates were introduced.',
+    warnings,
+    failures,
+    requiredTasksCompleted: requiredTasks.length,
+    requiredTasksTotal: requiredTasks.length,
+    incompleteFollowUpTasks: incompleteFollowUps.length,
+  };
 }
 
 function shouldAutoApprovePlan(mode: RunMode, policy: AutonomousRunPolicy): boolean {
@@ -668,6 +807,7 @@ async function executeApprovedRun(
   let improvementCycle = 0;
   let pendingImprovementDrafts: PlanTaskDraft[] = [];
   let latestTargetRoute = '/';
+  let budgetNote: string | null = null;
 
   while (commitsCreated < policy.maxCommits) {
     if (signal?.aborted) {
@@ -897,30 +1037,48 @@ async function executeApprovedRun(
     }
   }
 
-  if (getRunBudgetState(deadline).exhausted || commitsCreated >= policy.maxCommits || gracefulDrainRequested) {
+  const endBudgetState = getRunBudgetState(deadline);
+  const pendingTasksAfterLoop = unityStore
+    .listTasksByRun(run.id)
+    .filter((candidate) => candidate.status === 'pending');
+
+  if (endBudgetState.exhausted || commitsCreated >= policy.maxCommits || gracefulDrainRequested) {
     const blockingReason =
-      getRunBudgetState(deadline).exhausted
+      endBudgetState.exhausted
         ? `Run reached the max execution window of ${policy.maxHours} hour(s).`
         : gracefulDrainRequested
           ? `Run entered the final closing window and stopped scheduling new work to finish cleanly.`
           : `Run reached the max commit budget of ${policy.maxCommits}.`;
 
-    for (const task of unityStore.listTasksByRun(run.id).filter((candidate) => candidate.status === 'pending')) {
-      unityStore.updateTask(task.id, {
-        status: 'blocked',
-        validationSummary: blockingReason,
-        finishedAt: nowIso(),
-      });
-    }
+    if (pendingTasksAfterLoop.length > 0) {
+      budgetNote = blockingReason;
 
-    unityStore.addEvent(
-      createEntityId('event'),
-      run.id,
-      null,
-      'warning',
-      'run.budget_exhausted',
-      blockingReason,
-    );
+      for (const task of pendingTasksAfterLoop) {
+        unityStore.updateTask(task.id, {
+          status: 'blocked',
+          validationSummary: blockingReason,
+          finishedAt: nowIso(),
+        });
+      }
+
+      unityStore.addEvent(
+        createEntityId('event'),
+        run.id,
+        null,
+        'warning',
+        'run.budget_exhausted',
+        blockingReason,
+      );
+    } else if (commitsCreated >= policy.maxCommits) {
+      unityStore.addEvent(
+        createEntityId('event'),
+        run.id,
+        null,
+        'info',
+        'run.commit_budget_consumed',
+        `Run consumed the full commit budget of ${policy.maxCommits} while finishing scheduled work.`,
+      );
+    }
   }
 
   await checkoutBranch(baseWorkspace.repoPath, run.branchName);
@@ -943,15 +1101,20 @@ async function executeApprovedRun(
     null,
   );
   const tasks = unityStore.listTasksByRun(run.id);
-  const successfulTasks = tasks.filter((task) => task.status === 'succeeded' || task.status === 'skipped');
-  const failedTasks = tasks.filter((task) => task.status === 'failed');
-  const blockedTasks = tasks.filter((task) => task.status === 'blocked');
-  const hasFailedStaticGate = getNewFailedGates(baselineStaticResults, finalStaticResults).length > 0;
-  const hasFailedRuntimeGate = runtimeResults.some((gate) => gate.status === 'failed');
+  const closure = assessRunClosure(
+    plan.tasks.length,
+    tasks,
+    baselineStaticResults,
+    finalStaticResults,
+    runtimeResults,
+    budgetNote,
+  );
   const summary = formatRunSummary(
     run,
+    closure,
     tasks,
     commitsCreated,
+    budgetNote,
     baselineStaticResults,
     finalStaticResults,
     runtimeResults,
@@ -965,19 +1128,42 @@ async function executeApprovedRun(
     'continuous_improvement',
     `run:${run.id}:summary`,
     summary,
-    {
-      commitsCreated,
-      successfulTasks: successfulTasks.length,
-      failedTasks: failedTasks.length,
-      blockedTasks: blockedTasks.length,
-    },
+      {
+        commitsCreated,
+        successfulTasks: tasks.filter((task) => task.status === 'succeeded' || task.status === 'skipped').length,
+        requiredTasksCompleted: closure.requiredTasksCompleted,
+        requiredTasksTotal: closure.requiredTasksTotal,
+        outcome: closure.status,
+        warnings: closure.warnings,
+        failures: closure.failures,
+      },
+  );
+  unityStore.addArtifact(
+    createEntityId('artifact'),
+    run.id,
+    null,
+    'run-close-report',
+    JSON.stringify(
+      {
+        outcome: closure.status,
+        reason: closure.summaryReason,
+        warnings: closure.warnings,
+        failures: closure.failures,
+        requiredTasksCompleted: closure.requiredTasksCompleted,
+        requiredTasksTotal: closure.requiredTasksTotal,
+        incompleteFollowUpTasks: closure.incompleteFollowUpTasks,
+        commitsCreated,
+        commitBudget: run.maxCommits,
+        budgetNote,
+      },
+      null,
+      2,
+    ),
+    null,
   );
 
   unityStore.updateRun(run.id, {
-    status:
-      failedTasks.length === 0 && blockedTasks.length === 0 && !hasFailedStaticGate && !hasFailedRuntimeGate
-        ? 'completed'
-        : 'failed',
+    status: closure.status,
     finishedAt: nowIso(),
     summary,
   });
@@ -986,8 +1172,12 @@ async function executeApprovedRun(
     createEntityId('event'),
     run.id,
     null,
-    failedTasks.length === 0 && !hasFailedStaticGate && !hasFailedRuntimeGate ? 'info' : 'warning',
-    'run.completed',
+    closure.status === 'failed' ? 'error' : closure.status === 'completed_with_warnings' ? 'warning' : 'info',
+    closure.status === 'failed'
+      ? 'run.failed'
+      : closure.status === 'completed_with_warnings'
+        ? 'run.completed_with_warnings'
+        : 'run.completed',
     summary,
   );
 
