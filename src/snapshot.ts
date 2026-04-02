@@ -3,165 +3,204 @@ import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
 import puppeteer from 'puppeteer';
 import os from 'os';
-import { WORKSPACE_DIR } from './config.js';
-import { TARGET_EXPO_PATH, TARGET_API_PATH } from './git.js';
+import util from 'util';
+import { exec } from 'child_process';
+import type { PreparedWorkspace } from './domain/runtime.js';
 
-// Long-lived process handles allow restarts between runs without zombie servers.
+const execPromise = util.promisify(exec);
+
 let currentExpoProcess: ChildProcess | null = null;
 let currentNestProcess: ChildProcess | null = null;
-let currentNgrokProcess: ChildProcess | null = null;
 
 export interface SnapshotResult {
-    snapshotPath: string | null;
-    publicUrl: string | null;
-    localUrl: string;
-    warning?: string;
+  snapshotPath: string | null;
+  publicUrl: string | null;
+  localUrl: string;
+  warning?: string;
 }
 
-// Selects the first non-loopback IPv4 address for LAN preview links.
 function getLocalIpAddress(): string | null {
-    const interfaces = os.networkInterfaces();
-    for (const name of Object.keys(interfaces)) {
-        for (const iface of interfaces[name] || []) {
-            if (iface.family === 'IPv4' && !iface.internal) {
-                return iface.address;
-            }
-        }
+  const interfaces = os.networkInterfaces();
+
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name] || []) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        return iface.address;
+      }
     }
-    return null;
+  }
+
+  return null;
 }
 
-// Boots backend/frontend as needed and captures a mobile viewport screenshot of the target route.
-export async function takeSnapshot(targetRoute: string = '/'): Promise<SnapshotResult> {
-    // Normalizes Expo Router file paths into a browser-safe route.
-    let safeRoute = targetRoute.replace(/^\/?app\//, '/').replace(/\/\([^)]+\)/g, '').replace(/\/index\/?$/i, ''); 
-    if (!safeRoute || safeRoute === '') safeRoute = '/';
-    if (!safeRoute.startsWith('/')) safeRoute = '/' + safeRoute;
+function injectApiUrlToEnv(expoPath: string, url: string) {
+  const envPath = path.join(expoPath, '.env');
+  let envContent = '';
 
-    const snapshotPath = path.join(WORKSPACE_DIR, 'snapshot.png');
-    const port = 8081;
-    const localUrl = `http://localhost:${port}${safeRoute}`;
-    const ip = getLocalIpAddress();
-    const mobileUrl = ip ? `http://${ip}:${port}${safeRoute}` : null;
+  if (fs.existsSync(envPath)) {
+    envContent = fs.readFileSync(envPath, 'utf8');
+  }
 
-    console.log(`📸 Requested route: ${targetRoute}`);
+  envContent = envContent.replace(/^EXPO_PUBLIC_API_URL=.*$/gm, '').trim();
+  envContent += `\nEXPO_PUBLIC_API_URL=${url}\n`;
 
-    // Ensure previous run processes do not conflict with required ports.
-    if (currentExpoProcess) currentExpoProcess.kill();
-    if (currentNestProcess) currentNestProcess.kill();
-    if (currentNgrokProcess) currentNgrokProcess.kill();
-    await new Promise(r => setTimeout(r, 2000)); 
+  fs.writeFileSync(envPath, envContent.trim() + '\n');
+  console.log(`💉 Injected EXPO_PUBLIC_API_URL=${url} into Expo App`);
+}
 
-    let backendNgrokUrl: string | null = null;
-    
-    if (TARGET_API_PATH) {
-        // API startup is optional; frontend-only repos skip this entire block.
-        console.log("🔌 Starting NestJS Backend...");
-        currentNestProcess = spawn('npm', ['run', 'start'], { cwd: TARGET_API_PATH, shell: true });
-        
-        console.log("🚇 Opening Ngrok Tunnel for Backend (Port 3000)...");
-        // Avoid interactive npx prompts when ngrok is not already installed.
-        currentNgrokProcess = spawn('npx', ['--yes', 'ngrok', 'http', '3000', '--log=stdout'], { shell: true });
-        
-        await new Promise<void>((resolveBackend) => {
-            let isBackendResolved = false;
+function killTrackedProcess(proc: ChildProcess | null, label: string) {
+  if (!proc?.pid) return;
 
-            const processNgrokOutput = (data: any) => {
-                const output = data.toString();
-                if (output.trim()) {
-                    console.log(`[NGROK LOG] ${output.trim()}`);
-                }
+  try {
+    proc.kill('SIGKILL');
+    console.log(`🛑 Killed tracked ${label} process PID=${proc.pid}`);
+  } catch (error: any) {
+    console.log(`⚠️ Failed to kill tracked ${label} PID=${proc.pid}: ${error.message}`);
+  }
+}
 
-                const match = output.match(/url=(https:\/\/[a-zA-Z0-9-]+\.ngrok[^\s]*)/i);
-                
-                if (match && !backendNgrokUrl && !isBackendResolved) {
-                    backendNgrokUrl = match[1];
-                    console.log(`✅ Backend Tunnel Ready: ${backendNgrokUrl}`);
-                    
-                    // Persist tunnel URL so Expo can call the API from browser/mobile environments.
-                    const envPath = path.join(TARGET_EXPO_PATH, '.env');
-                    let envContent = '';
-                    if (fs.existsSync(envPath)) {
-                        envContent = fs.readFileSync(envPath, 'utf8');
-                    }
-                    
-                    envContent = envContent.replace(/^EXPO_PUBLIC_API_URL=.*$/gm, '').trim();
-                    envContent += `\nEXPO_PUBLIC_API_URL=${backendNgrokUrl}\n`;
-                    fs.writeFileSync(envPath, envContent.trim() + '\n');
-                    console.log(`💉 Injected EXPO_PUBLIC_API_URL into Expo App`);
-                    
-                    isBackendResolved = true;
-                    resolveBackend();
-                }
-            };
+async function killPort(port: number) {
+  try {
+    await execPromise(`fuser -k ${port}/tcp || true`);
+    console.log(`🧹 Cleared port ${port}`);
+  } catch (error: any) {
+    console.log(`⚠️ Failed clearing port ${port}: ${error.message}`);
+  }
+}
 
-            // Ngrok can emit the URL on stdout or stderr depending on version/platform.
-            currentNgrokProcess?.stdout?.on('data', processNgrokOutput);
-            currentNgrokProcess?.stderr?.on('data', processNgrokOutput);
+export async function takeSnapshot(
+  workspace: PreparedWorkspace,
+  targetRoute: string = '/',
+): Promise<SnapshotResult> {
+  let safeRoute = targetRoute
+    .replace(/^\/?app\//, '/')
+    .replace(/\/\([^)]+\)/g, '')
+    .replace(/\/index\/?$/i, '');
 
-            setTimeout(() => {
-                if (!isBackendResolved) {
-                    console.log("⚠️ Ngrok backend tunnel timeout. Continuing without it...");
-                    isBackendResolved = true;
-                    resolveBackend();
-                }
-            }, 15000);
-        });
-    }
+  if (!safeRoute) safeRoute = '/';
+  if (!safeRoute.startsWith('/')) safeRoute = '/' + safeRoute;
 
-    return new Promise((resolve) => {
-        console.log("🚀 Starting new Expo Web Server...");
-        
-        currentExpoProcess = spawn('npx', ['expo', 'start', '--web', '--port', port.toString()], {
-            cwd: TARGET_EXPO_PATH,
-            shell: true
-        });
+  const snapshotPath = path.join(workspace.workspaceDir, 'snapshot.png');
+  const port = 8081;
+  const backendPort = 3000;
+  const localUrl = `http://localhost:${port}${safeRoute}`;
+  const ip = getLocalIpAddress();
+  const mobileUrl = ip ? `http://${ip}:${port}${safeRoute}` : null;
 
-        let isResolved = false;
-        let serverReady = false;
+  console.log(`📸 Requested route: ${targetRoute}`);
+  console.log('🚀 Launching preview services', {
+    expoPath: workspace.expoPath,
+    apiPath: workspace.apiPath,
+    localUrl,
+    mobileUrl,
+  });
 
-        // Expo startup logs vary by version; match multiple readiness signatures.
-        const processOutput = (data: any) => {
-            const rawString = data.toString();
-            if (rawString.includes('http://localhost') || rawString.includes('Web is waiting on') || rawString.includes('ready in')) {
-                serverReady = true;
-            }
-        };
+  killTrackedProcess(currentExpoProcess, 'expo');
+  killTrackedProcess(currentNestProcess, 'nest');
+  currentExpoProcess = null;
+  currentNestProcess = null;
 
-        currentExpoProcess.stdout?.on('data', processOutput);
-        currentExpoProcess.stderr?.on('data', processOutput);
+  await killPort(port);
+  await killPort(backendPort);
+  await new Promise((resolve) => setTimeout(resolve, 1500));
 
-        const checkInterval = setInterval(async () => {
-            if (serverReady && !isResolved) {
-                isResolved = true;
-                clearInterval(checkInterval);
-                
-                try {
-                    console.log(`🌐 Expo Server ready! Taking snapshot...`);
-                    const browser = await puppeteer.launch({ headless: true });
-                    const page = await browser.newPage();
-                    await page.setViewport({ width: 390, height: 844, isMobile: true });
-                    
-                    await page.goto(localUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-                    await page.screenshot({ path: snapshotPath });
-                    await browser.close();
-                    
-                    resolve({ snapshotPath, publicUrl: mobileUrl, localUrl });
-                } catch (error: any) {
-                    // Snapshot failure should not fail the entire request pipeline.
-                    console.log(`⚠️ Puppeteer failed: ${error.message}`);
-                    resolve({ snapshotPath: null, publicUrl: mobileUrl, localUrl, warning: `Snapshot failed: ${error.message}` });
-                }
-            }
-        }, 1000);
+  if (workspace.apiPath) {
+    console.log('🔌 Starting NestJS Backend (Local Port 3000)...');
 
-        // Hard timeout so callers are not blocked forever by server boot issues.
-        setTimeout(async () => {
-            if (!isResolved) {
-                isResolved = true;
-                clearInterval(checkInterval);
-                resolve({ snapshotPath: null, publicUrl: mobileUrl, localUrl, warning: "⚠️ Server start timeout." });
-            }
-        }, 30000); 
+    currentNestProcess = spawn('npm', ['run', 'start'], {
+      cwd: workspace.apiPath,
+      stdio: 'pipe',
     });
+
+    currentNestProcess.stdout?.on('data', (data) => {
+      console.log(`[NEST] ${data.toString().trim()}`);
+    });
+
+    currentNestProcess.stderr?.on('data', (data) => {
+      console.log(`[NEST:ERR] ${data.toString().trim()}`);
+    });
+
+    const backendUrl = ip ? `http://${ip}:${backendPort}` : `http://localhost:${backendPort}`;
+    injectApiUrlToEnv(workspace.expoPath, backendUrl);
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+
+  return new Promise((resolve) => {
+    console.log('🚀 Starting new Expo Web Server...');
+
+    currentExpoProcess = spawn('npx', ['expo', 'start', '--web', '--port', port.toString()], {
+      cwd: workspace.expoPath,
+      stdio: 'pipe',
+    });
+
+    currentExpoProcess.stdout?.on('data', (data) => {
+      console.log(`[EXPO] ${data.toString().trim()}`);
+    });
+
+    currentExpoProcess.stderr?.on('data', (data) => {
+      console.log(`[EXPO:ERR] ${data.toString().trim()}`);
+    });
+
+    let isResolved = false;
+    let serverReady = false;
+
+    const processOutput = (data: any) => {
+      const rawString = data.toString();
+      if (
+        rawString.includes('http://localhost') ||
+        rawString.includes('Web is waiting on') ||
+        rawString.includes('ready in')
+      ) {
+        serverReady = true;
+      }
+    };
+
+    currentExpoProcess.stdout?.on('data', processOutput);
+    currentExpoProcess.stderr?.on('data', processOutput);
+
+    const checkInterval = setInterval(async () => {
+      if (serverReady && !isResolved) {
+        isResolved = true;
+        clearInterval(checkInterval);
+
+        try {
+          console.log('🌐 Expo Server ready! Taking snapshot...');
+
+          const browser = await puppeteer.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+          });
+
+          const page = await browser.newPage();
+          await page.setViewport({ width: 390, height: 844, isMobile: true });
+          await page.goto(localUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+          await page.screenshot({ path: snapshotPath });
+          await browser.close();
+
+          resolve({ snapshotPath, publicUrl: mobileUrl, localUrl });
+        } catch (error: any) {
+          console.log(`⚠️ Puppeteer failed: ${error.message}`);
+          resolve({
+            snapshotPath: null,
+            publicUrl: mobileUrl,
+            localUrl,
+            warning: `Snapshot failed: ${error.message}`,
+          });
+        }
+      }
+    }, 1000);
+
+    setTimeout(() => {
+      if (!isResolved) {
+        isResolved = true;
+        clearInterval(checkInterval);
+        resolve({
+          snapshotPath: null,
+          publicUrl: mobileUrl,
+          localUrl,
+          warning: '⚠️ Server start timeout.',
+        });
+      }
+    }, 30000);
+  });
 }

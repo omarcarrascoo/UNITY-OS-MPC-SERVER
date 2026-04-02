@@ -13,6 +13,44 @@ const commands = [
     new SlashCommandBuilder()
         .setName('status')
         .setDescription('Muestra en qué proyecto está trabajando el agente actualmente.'),
+
+    new SlashCommandBuilder()
+        .setName('policy')
+        .setDescription('Configura la política autónoma del repo activo.')
+        .addIntegerOption(option =>
+            option.setName('hours')
+                .setDescription('Máximo de horas por run autónomo (1-4)')
+                .setMinValue(1)
+                .setMaxValue(4)
+                .setRequired(false))
+        .addIntegerOption(option =>
+            option.setName('commits')
+                .setDescription('Máximo de commits por run autónomo')
+                .setMinValue(1)
+                .setMaxValue(50)
+                .setRequired(false))
+        .addIntegerOption(option =>
+            option.setName('parallel')
+                .setDescription('Máximo de tareas paralelas')
+                .setMinValue(1)
+                .setMaxValue(6)
+                .setRequired(false))
+        .addIntegerOption(option =>
+            option.setName('retries')
+                .setDescription('Máximo de reintentos por tarea')
+                .setMinValue(0)
+                .setMaxValue(5)
+                .setRequired(false))
+        .addIntegerOption(option =>
+            option.setName('improvements')
+                .setDescription('Ciclos máximos de self-improvement')
+                .setMinValue(0)
+                .setMaxValue(4)
+                .setRequired(false))
+        .addBooleanOption(option =>
+            option.setName('autoapproveplan')
+                .setDescription('Autoaprueba planes en modo nightly')
+                .setRequired(false)),
         
     new SlashCommandBuilder()
         .setName('init')

@@ -3,7 +3,7 @@ import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import fs from 'fs';
 import path from 'path';
-import { TARGET_REPO_PATH } from './config.js';
+import { getDefaultProject } from './config.js';
 
 export interface GeneratedFile { filepath: string; code: string; }
 export interface AIResponse { targetRoute: string; commitMessage: string; files: GeneratedFile[]; }
@@ -14,6 +14,7 @@ export async function generateAndWriteCode(
     figmaData: string | null, 
     projectContext: string
 ): Promise<{ targetRoute: string, commitMessage: string }> {
+    const targetRepoPath = getDefaultProject().repoPath;
     const provider = process.env.AI_PROVIDER || 'gemini';
     console.log(`🧠 AI Engine Initialized: ${provider.toUpperCase()}`);
 
@@ -65,7 +66,7 @@ export async function generateAndWriteCode(
     } else {
         // OpenAI-compatible providers share a common request shape via baseURL + modelName.
         let baseURL = '', apiKey = '', modelName = '';
-        if (provider === 'deepseek') { baseURL = 'https://api.deepseek.com'; apiKey = process.env.DEEPSEEK_API_KEY as string; modelName = 'deepseek-chat'; } 
+        if (provider === 'deepseek') { baseURL = 'https://api.deepseek.com'; apiKey = process.env.DEEPSEEK_API_KEY as string; modelName = 'deepseek-reasoner'; } 
         else if (provider === 'groq') { baseURL = 'https://api.groq.com/openai/v1'; apiKey = process.env.GROQ_API_KEY as string; modelName = 'llama-3.3-70b-versatile'; } 
         else if (provider === 'openrouter') { baseURL = 'https://openrouter.ai/api/v1'; apiKey = process.env.OPENROUTER_API_KEY as string; modelName = 'qwen/qwen-2.5-coder-32b-instruct:free'; }
 
@@ -98,7 +99,7 @@ export async function generateAndWriteCode(
         const commitMessage = parsedData.commitMessage || 'feat: auto-update from AI';
 
         for (const file of filesToCreate) {
-            const fullPath = path.join(TARGET_REPO_PATH, file.filepath);
+            const fullPath = path.join(targetRepoPath, file.filepath);
             const dir = path.dirname(fullPath);
             if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
             fs.writeFileSync(fullPath, file.code);
