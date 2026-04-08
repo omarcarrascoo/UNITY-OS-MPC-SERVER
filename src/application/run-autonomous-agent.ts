@@ -452,6 +452,9 @@ async function executeTask(
   });
 
   try {
+    if (onProgress) {
+      await onProgress(`🧪 [${task.title}] Running baseline scoped gates before editing...`);
+    }
     const baselineStaticGates = await runStaticGates(taskWorktree.workspace, policy, task.writeScope);
     const projectTree = getProjectTree(taskWorktree.workspace.repoPath);
     const execution = await generateAndWriteCode({
@@ -468,10 +471,21 @@ async function executeTask(
       },
     });
 
+    if (onProgress) {
+      await onProgress(`🧩 [${task.title}] Patch accepted by scoped compiler checks. Preparing commit...`);
+    }
     const commitSha = await commitAllChanges(
       taskWorktree.workspace.repoPath,
       execution.commitMessage || `chore: ${task.title.toLowerCase()}`,
     );
+
+    if (onProgress) {
+      await onProgress(
+        commitSha
+          ? `💾 [${task.title}] Created task commit ${commitSha.slice(0, 8)}. Running scope/reviewer gates...`
+          : `⏭️ [${task.title}] No file changes were produced, so no task commit was created.`,
+      );
+    }
 
     const diff = commitSha ? await getDiffAgainstHead(taskWorktree.workspace.repoPath) : '';
     const outOfScopePaths = getOutOfScopePaths(taskWorktree.workspace, diff, task.writeScope);
@@ -510,6 +524,14 @@ async function executeTask(
       diff,
       gateResults: staticGates,
     });
+
+    if (onProgress) {
+      await onProgress(
+        `🔎 [${task.title}] Reviewer ${review.approved ? 'approved' : 'rejected'} the task. Scope gate: ${
+          scopeGateResults[0]?.status || 'unknown'
+        }. Baseline delta: ${baselineDeltaGate.status}.`,
+      );
+    }
 
     const validationSummary = `${summarizeGateResults(staticGates)}\n\nReviewer: ${review.summary}`;
     const hasFailedGate = scopeGateResults.some((gate) => gate.status === 'failed') || baselineDeltaGate.status === 'failed';
@@ -925,6 +947,9 @@ async function executeApprovedRun(
 
       if (result.outcome.status === 'succeeded') {
         try {
+          if (onProgress) {
+            await onProgress(`🔀 [${task.title}] Integrating commit into ${run.branchName}...`);
+          }
           await integrateTaskResult(baseWorkspace, run, result);
           commitsCreated += result.outcome.commitSha ? 1 : 0;
           latestTargetRoute = result.targetRoute || latestTargetRoute;
@@ -958,6 +983,12 @@ async function executeApprovedRun(
             },
           );
 
+          if (onProgress) {
+            await onProgress(
+              `✅ [${task.title}] Integrated successfully. Commit budget: ${commitsCreated}/${policy.maxCommits}.`,
+            );
+          }
+
           if (!gracefulDrainRequested) {
             pendingImprovementDrafts.push(...result.review.followUpTasks);
           }
@@ -977,6 +1008,9 @@ async function executeApprovedRun(
               'task.retry.integration',
               validationSummary,
             );
+            if (onProgress) {
+              await onProgress(`⚠️ [${task.title}] Integration failed and will retry. ${validationSummary}`);
+            }
           } else {
             unityStore.updateTask(task.id, {
               status: 'failed',
@@ -991,6 +1025,9 @@ async function executeApprovedRun(
               'task.failed.integration',
               validationSummary,
             );
+            if (onProgress) {
+              await onProgress(`❌ [${task.title}] Integration failed permanently. ${validationSummary}`);
+            }
           }
         }
 
@@ -1012,6 +1049,9 @@ async function executeApprovedRun(
           'task.retry.validation',
           validationSummary,
         );
+        if (onProgress) {
+          await onProgress(`⚠️ [${task.title}] Validation failed and will retry. ${validationSummary}`);
+        }
       } else {
         unityStore.updateTask(task.id, {
           status: result.outcome.status,
@@ -1029,6 +1069,9 @@ async function executeApprovedRun(
           'task.failed.validation',
           validationSummary,
         );
+        if (onProgress) {
+          await onProgress(`❌ [${task.title}] Validation failed permanently. ${validationSummary}`);
+        }
       }
     }
 
@@ -1082,6 +1125,9 @@ async function executeApprovedRun(
   }
 
   await checkoutBranch(baseWorkspace.repoPath, run.branchName);
+  if (onProgress) {
+    await onProgress(`🧪 Running final static gates on ${run.branchName}...`);
+  }
   const finalStaticResults = await runStaticGates(baseWorkspace, policy);
   unityStore.addArtifact(
     createEntityId('artifact'),
@@ -1091,7 +1137,15 @@ async function executeApprovedRun(
     JSON.stringify(finalStaticResults, null, 2),
     null,
   );
-  const runtimeResults = await runRuntimeGate(baseWorkspace, policy, latestTargetRoute);
+  if (onProgress) {
+    await onProgress(
+      `🧪 Final static gates finished. Failed gates: ${
+        finalStaticResults.filter((gate) => gate.status === 'failed').map((gate) => gate.name).join(', ') || 'none'
+      }.`,
+    );
+    await onProgress(`🌐 Starting runtime gate for route ${latestTargetRoute}...`);
+  }
+  const runtimeResults = await runRuntimeGate(baseWorkspace, policy, latestTargetRoute, onProgress);
   unityStore.addArtifact(
     createEntityId('artifact'),
     run.id,
@@ -1100,6 +1154,13 @@ async function executeApprovedRun(
     JSON.stringify(runtimeResults, null, 2),
     null,
   );
+  if (onProgress) {
+    await onProgress(
+      `🌐 Runtime gate finished. Failed gates: ${
+        runtimeResults.filter((gate) => gate.status === 'failed').map((gate) => gate.name).join(', ') || 'none'
+      }.`,
+    );
+  }
   const tasks = unityStore.listTasksByRun(run.id);
   const closure = assessRunClosure(
     plan.tasks.length,
