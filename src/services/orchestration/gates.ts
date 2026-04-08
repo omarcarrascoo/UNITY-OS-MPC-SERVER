@@ -151,6 +151,7 @@ export async function runRuntimeGate(
   workspace: PreparedWorkspace,
   policy: AutonomousRunPolicy,
   targetRoute = '/',
+  onLog?: (message: string) => Promise<void> | void,
 ): Promise<GateResult[]> {
   if (!policy.gates.runRuntime) {
     return [
@@ -162,7 +163,7 @@ export async function runRuntimeGate(
     ];
   }
 
-  const runtimeResult = await runProjectRuntimeGate(workspace, targetRoute);
+  const runtimeResult = await runProjectRuntimeGate(workspace, targetRoute, onLog);
 
   return [
     {

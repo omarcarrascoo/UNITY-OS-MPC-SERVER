@@ -51,7 +51,7 @@ export function getRuntimeConfig(): RuntimeConfig {
     deepseekApiKey: process.env.DEEPSEEK_API_KEY,
     manualChannelName: process.env.UNITY_MANUAL_CHANNEL || 'jarvis-dev',
     autonomousChannelName: process.env.UNITY_AUTONOMOUS_CHANNEL || 'unity-agent',
-    integrationBranchName: process.env.UNITY_INTEGRATION_BRANCH || 'unity-per-development2221223',
+    integrationBranchName: process.env.UNITY_INTEGRATION_BRANCH || 'unity-per2323455632',
     localConsolePort: Number(process.env.UNITY_LOCAL_CONSOLE_PORT || 4477),
   };
 }
